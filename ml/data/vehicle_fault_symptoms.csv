@@ -1,0 +1,49 @@
+symptom_text,fault_category,reference_dtc
+Engine shakes at idle and misfires under acceleration with an intermittent check engine light,Engine misfire,P0300
+Random engine misfire and rough running are worse when climbing a hill,Engine misfire,P0300
+Vehicle hesitates and vibrates with a flashing malfunction indicator lamp,Engine misfire,P0300
+Uneven idle with intermittent loss of power and misfire codes,Engine misfire,P0300
+Engine stumbles on startup and shakes during acceleration,Engine misfire,P0300
+Repeated misfire symptoms occur across several cylinders under load,Engine misfire,P0300
+Rough running and exhaust popping happen during acceleration,Engine misfire,P0300
+Engine runs unevenly with sudden power loss and a flashing warning lamp,Engine misfire,P0300
+Idle speed hunts and fuel trim is strongly positive with a lean code,Lean air-fuel mixture,P0171
+Engine surges at idle and has a hissing sound near the intake,Lean air-fuel mixture,P0171
+Hesitation on acceleration with lean exhaust readings and high fuel trims,Lean air-fuel mixture,P0171
+Air intake hose looks split and the engine runs rough at idle,Lean air-fuel mixture,P0171
+Vehicle stalls at stops and scan data shows positive long term fuel trim,Lean air-fuel mixture,P0171
+Lean mixture warning with unstable idle and suspected vacuum leak,Lean air-fuel mixture,P0171
+Engine lacks power and fuel correction remains high at idle,Lean air-fuel mixture,P0171
+Rough idle improves when engine speed rises and lean fault is stored,Lean air-fuel mixture,P0171
+Coolant temperature rises very slowly and cabin heat is weak in cold weather,Cooling system temperature / thermostat,P0128
+Engine takes unusually long to reach operating temperature,Cooling system temperature / thermostat,P0128
+Temperature gauge stays low on the highway and heater output is poor,Cooling system temperature / thermostat,P0128
+Coolant temperature reading remains below expected warm up range,Cooling system temperature / thermostat,P0128
+Fuel economy has worsened and engine warm up takes much longer than usual,Cooling system temperature / thermostat,P0128
+Cabin heater blows cool air while scan data shows low coolant temperature,Cooling system temperature / thermostat,P0128
+Thermostat performance warning appears after a long warm up,Cooling system temperature / thermostat,P0128
+Engine temperature is slow to rise with no obvious external coolant leak,Cooling system temperature / thermostat,P0128
+Check engine light is on with a catalyst efficiency code and no obvious drivability complaint,Catalyst system efficiency,P0420
+Emissions test failed for catalyst performance while engine runs smoothly,Catalyst system efficiency,P0420
+Downstream oxygen sensor activity resembles the upstream sensor after warm up,Catalyst system efficiency,P0420
+Catalyst monitor reports low efficiency after exhaust leaks were ruled out,Catalyst system efficiency,P0420
+Fuel economy is reduced and the catalyst system efficiency warning returns,Catalyst system efficiency,P0420
+Exhaust emissions are high and a catalyst threshold code is stored,Catalyst system efficiency,P0420
+Catalyst performance code returns after engine misfire and fuel trim faults were repaired,Catalyst system efficiency,P0420
+Warm engine has a recurring catalyst efficiency warning without a severe misfire,Catalyst system efficiency,P0420
+Fuel odor is present near the vehicle and an EVAP large leak code is stored,EVAP system leak,P0455
+Check engine light indicates a large evaporative emissions leak,EVAP system leak,P0455
+Fuel cap area smells of vapor and the EVAP self test fails,EVAP system leak,P0455
+EVAP leak monitor fails and a cracked vapor hose is suspected,EVAP system leak,P0455
+Vehicle has fuel vapor odor after refueling with a recurring leak warning,EVAP system leak,P0455
+Large leak code returns after the fuel cap is tightened,EVAP system leak,P0455
+Evaporative emissions test fails and vapor lines need inspection,EVAP system leak,P0455
+Fuel tank pressure test indicates an EVAP system leak,EVAP system leak,P0455
+Battery warning appears and cranking is slow with low system voltage,Low system voltage / charging,P0562
+Headlamps dim at idle and charging voltage is below specification,Low system voltage / charging,P0562
+Vehicle needs repeated jump starts and battery voltage drops while running,Low system voltage / charging,P0562
+Low voltage code is stored with intermittent electrical resets,Low system voltage / charging,P0562
+Battery light flickers and accessories weaken when engine speed changes,Low system voltage / charging,P0562
+Charging system warning appears and the battery does not remain charged,Low system voltage / charging,P0562
+Starter turns slowly and scan data records low supply voltage,Low system voltage / charging,P0562
+Electrical modules reset intermittently with a low voltage fault code,Low system voltage / charging,P0562

@@ -1,0 +1,96 @@
+{
+  "version": "smart-workshop-components-v1",
+  "components": [
+    {
+      "key": "engine",
+      "label": "Engine",
+      "description": "Engine assembly, ignition, fuel trimming and ancillary drive.",
+      "exteriorNodes": [],
+      "inspectionFocus": ["Check engine light and stored codes", "Idle quality and fuel trims", "Spark plugs and ignition coils", "Compression and leak-down where indicated"]
+    },
+    {
+      "key": "transmission",
+      "label": "Transmission / gearbox",
+      "description": "Gearbox, clutch or torque converter, and driveline coupling.",
+      "exteriorNodes": [],
+      "inspectionFocus": ["Check transmission fluid condition and level", "Verify shift quality and engagement delays", "Scan transmission control codes and live data", "Inspect mounts and driveline joints"]
+    },
+    {
+      "key": "battery",
+      "label": "Battery / charging",
+      "description": "Battery, alternator, terminals, grounds and charging circuit.",
+      "exteriorNodes": [],
+      "inspectionFocus": ["Load-test the battery", "Inspect terminals, grounds and fuses", "Measure charging voltage and alternator output", "Check accessory belt condition"]
+    },
+    {
+      "key": "radiator",
+      "label": "Radiator",
+      "description": "Radiator core, cap, hoses and front-end airflow path.",
+      "exteriorNodes": [],
+      "inspectionFocus": ["Inspect core for damage or obstruction", "Check cap, hoses and clamps after cooling", "Verify coolant level and condition", "Check airflow and fan shroud"]
+    },
+    {
+      "key": "cooling_system",
+      "label": "Cooling system",
+      "description": "Thermostat, coolant temperature sensing, pump and cooling fans.",
+      "exteriorNodes": [],
+      "inspectionFocus": ["Compare scan-tool temperature with a warm-up trace", "Verify thermostat opening temperature", "Check water pump and circulation", "Verify cooling fan operation"]
+    },
+    {
+      "key": "brakes",
+      "label": "Braking system",
+      "description": "Brake discs, calipers, pads and hydraulic circuit.",
+      "exteriorNodes": ["brake"],
+      "inspectionFocus": ["Measure pad and disc wear", "Inspect calipers, hoses and fluid", "Check ABS codes and sensor wiring", "Road-test braking balance where safe"]
+    },
+    {
+      "key": "front_suspension",
+      "label": "Front suspension",
+      "description": "Front struts, control arms, ball joints and anti-roll linkage.",
+      "exteriorNodes": [],
+      "inspectionFocus": ["Inspect struts and mounts for leakage", "Check ball joints, bushings and tie-rod ends", "Check spring condition and ride height", "Perform a suspension play inspection"]
+    },
+    {
+      "key": "rear_suspension",
+      "label": "Rear suspension",
+      "description": "Rear springs or struts, linkage, bushings and dampers.",
+      "exteriorNodes": [],
+      "inspectionFocus": ["Check dampers for leakage and response", "Inspect bushes and link rods", "Check spring condition and ride height", "Inspect rear hub and bearing play"]
+    },
+    {
+      "key": "steering",
+      "label": "Steering system",
+      "description": "Steering rack, column, linkages and power assistance.",
+      "exteriorNodes": ["steering_wheel", "steering_column"],
+      "inspectionFocus": ["Check steering play and free movement", "Inspect rack, boots and tie rods", "Check power-assist fluid or electric assist faults", "Verify wheel alignment after repair"]
+    },
+    {
+      "key": "wheels_tyres",
+      "label": "Wheels and tyres",
+      "description": "Road wheels, rims and tyres including tread and pressure.",
+      "exteriorNodes": ["wheel_fl", "wheel_fr", "wheel_rl", "wheel_rr", "rim_fl", "rim_fr", "rim_rl", "rim_rr", "tire"],
+      "inspectionFocus": ["Measure tread depth and check uneven wear", "Set tyre pressures to specification", "Inspect rims for cracks or damage", "Check wheel balance and alignment"]
+    },
+    {
+      "key": "exhaust",
+      "label": "Exhaust system",
+      "description": "Exhaust manifold, pipework, catalysts, muffler and oxygen sensors.",
+      "exteriorNodes": [],
+      "inspectionFocus": ["Check for exhaust leaks", "Review catalyst efficiency codes", "Inspect oxygen sensor activity after warm-up", "Inspect mounts and pipework corrosion"]
+    }
+  ],
+  "faultComponentMap": {
+    "Engine misfire": "engine",
+    "Lean air-fuel mixture": "engine",
+    "EVAP system leak": "engine",
+    "Cooling system temperature / thermostat": "cooling_system",
+    "Catalyst system efficiency": "exhaust",
+    "Low system voltage / charging": "battery"
+  },
+  "modelMetadata": {
+    "exteriorModel": "Ferrari 458 Italia, model by vicent091036, CC BY 4.0, distributed by three.js examples",
+    "exteriorModelPath": "/assets/models/ferrari.glb",
+    "exteriorModelIsGeneric": true,
+    "interactiveComponentsSource": "Procedural R3F mechanical assembly (not nodes inside the exterior GLB), plus real wheel/brake/steering nodes in the exterior model where named"
+  }
+}

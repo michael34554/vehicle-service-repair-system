@@ -1,0 +1,6 @@
+{
+  "name": "NEXTGEN – Vehicle Service and Repair Management System",
+  "description": "Driving Excellence Through Smart Vehicle Care. Professional automotive workshop management for vehicles, customers, repair workflows, parts, payments, and reporting.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
