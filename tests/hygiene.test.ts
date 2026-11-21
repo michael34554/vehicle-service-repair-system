@@ -28,3 +28,13 @@ test('clean and test scripts are cross-platform', () => {
   assert.ok(packageJson.scripts.clean.startsWith('node '), 'clean must not depend on rm -rf');
   assert.match(packageJson.scripts.test, /node --test|tsx --test/);
 });
+
+test('AI and 3D disclaimers match the implemented model and assets', () => {
+  const view = read('src/components/views/SmartWorkshopView.tsx');
+  assert.doesNotMatch(view, /uncalibrated model scores/i);
+  assert.match(view, /not diagnoses or verified failure probabilities/);
+  assert.match(view, /calibrated only against synthetic grouped holdout data/);
+  assert.match(view, /licensed generic illustration/);
+  assert.match(view, /procedural inspection assembly/);
+  assert.match(view, /not an exact replica of this vehicle/);
+});

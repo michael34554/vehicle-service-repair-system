@@ -597,7 +597,7 @@ export const SmartWorkshopView: React.FC<Props> = ({ onViewRepair }) => {
       <div role="alert" className="flex items-start gap-3 rounded-xl border-l-4 border-amber-500 bg-amber-50 p-4 text-sm text-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
         <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0" />
         <p>
-          <strong>Professional verification required.</strong> AI predictions are uncalibrated model scores and are not diagnoses or failure probabilities.
+          <strong>Professional verification required.</strong> AI predictions are not diagnoses or verified failure probabilities; confidence is calibrated only against synthetic grouped holdout data and must be confirmed by a qualified mechanic.
           The 3D body is a licensed generic illustration; internal components are a procedural inspection assembly, not an exact replica of this vehicle.
         </p>
       </div>
