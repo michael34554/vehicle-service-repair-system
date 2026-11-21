@@ -33,7 +33,7 @@ import {
   type SmartWorkshopConfig,
   type WorkshopStatus,
 } from '@/shared/smartWorkshop';
-import type { CameraPreset, ViewerMode, ViewStyle } from '../smartWorkshop/viewerConfig';
+import type { AssetAvailability, CameraPreset, ViewerMode, ViewStyle } from '../smartWorkshop/viewerConfig';
 import { AiModelPanel } from '../smartWorkshop/AiModelPanel';
 import { CatalogueAdminPanel } from '../smartWorkshop/CatalogueAdminPanel';
 import { CommonProblemsPanel } from '../smartWorkshop/CommonProblemsPanel';
@@ -65,6 +65,15 @@ interface VehicleSummary {
   vin?: string | null;
   engine_number?: string | null;
   customer_name?: string | null;
+}
+
+interface DisplayVehicle extends Omit<VehicleSummary, 'model_year'> {
+  model_year: number | null;
+  engine_type?: string | null;
+  engine_capacity_cc?: number | null;
+  fuel_type?: string | null;
+  transmission_type?: string | null;
+  drive_type?: string | null;
 }
 
 interface FaultCandidate {
@@ -152,6 +161,57 @@ interface ModelAsset {
   is_exact_match: number | boolean;
   notes?: string | null;
   node_map_json?: string | null;
+  node_map?: Record<string, ComponentKey>;
+  shadow_path?: string | null;
+  availability_status?: AssetAvailability;
+  available_view_modes?: ViewerMode[];
+  is_catalogue_selectable?: boolean;
+  file_exists?: boolean;
+}
+
+interface CatalogueAsset {
+  asset_key: string;
+  label: string;
+  model_path: string;
+  node_map_json?: string | null;
+  shadow_path?: string | null;
+  license: string;
+  license_url?: string | null;
+  source: string;
+  notes?: string | null;
+  is_generic: boolean;
+  is_exact_match: boolean;
+  is_catalogue_selectable: boolean;
+  availability_status: AssetAvailability;
+  file_exists: boolean;
+  available_view_modes: ViewerMode[];
+  inspectable_components: ComponentKey[];
+  node_map: Record<string, ComponentKey>;
+  manufacturer_name?: string | null;
+  model_name?: string | null;
+  year_from?: number | null;
+  year_to?: number | null;
+  variant?: string | null;
+}
+
+interface CatalogueVehicleModel {
+  id: string;
+  name: string;
+  manufacturer_id: string;
+  manufacturer_name: string;
+  body_style?: string | null;
+  asset_status?: string | null;
+  specification_note?: string | null;
+  years: number[];
+  variants: string[];
+  engines: string[];
+  asset: CatalogueAsset | null;
+}
+
+interface CatalogueManufacturer {
+  id: string;
+  name: string;
+  models: CatalogueVehicleModel[];
 }
 
 interface SpecificationField {
@@ -170,6 +230,8 @@ interface WorkshopData {
   active_assignment?: ActiveMechanicAssignment | null;
   catalogue_model?: CatalogueModel | null;
   model_asset?: ModelAsset | null;
+  asset_status?: AssetAvailability;
+  available_view_modes?: ViewerMode[];
   specifications?: { fields: SpecificationField[]; missing: string[]; note: string };
 }
 
@@ -278,19 +340,51 @@ export const SmartWorkshopView: React.FC<Props> = ({ onViewRepair }) => {
   const [inspectionJobId, setInspectionJobId] = useState('');
   const [focusSelected, setFocusSelected] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [selectionSource, setSelectionSource] = useState<'registered' | 'catalogue'>('registered');
+  const [catalogue, setCatalogue] = useState<CatalogueManufacturer[]>([]);
+  const [catalogueLoading, setCatalogueLoading] = useState(false);
+  const [catalogueManufacturerId, setCatalogueManufacturerId] = useState('');
+  const [catalogueModelId, setCatalogueModelId] = useState('');
+  const [catalogueYear, setCatalogueYear] = useState('');
+  const [catalogueVariant, setCatalogueVariant] = useState('');
+  const [catalogueEngine, setCatalogueEngine] = useState('');
+  const [allowRepresentative, setAllowRepresentative] = useState(false);
+  const [linkingCatalogue, setLinkingCatalogue] = useState(false);
 
   const canManage = ['owner', 'manager', 'advisor'].includes(role);
   const canAdminCatalogue = ['owner', 'manager'].includes(role);
   const canManageIntelligence = ['owner', 'manager', 'advisor'].includes(role);
-  const statuses = data?.statuses ?? deriveComponentStatuses(
-    SMART_WORKSHOP_CONFIG.components.map((entry) => entry.key), [], []);
+  const statuses = selectionSource === 'catalogue'
+    ? deriveComponentStatuses(SMART_WORKSHOP_CONFIG.components.map((entry) => entry.key), [], [])
+    : data?.statuses ?? deriveComponentStatuses(
+        SMART_WORKSHOP_CONFIG.components.map((entry) => entry.key), [], []);
   const selectedComponent = SMART_WORKSHOP_CONFIG.components.find((entry) => entry.key === selected) ?? null;
   const selectedStatus: ComponentStatus | null = selected ? statuses[selected] ?? null : null;
-  const modelPath = data?.model_asset?.model_path ?? String(SMART_WORKSHOP_CONFIG.modelMetadata.exteriorModelPath);
+
+  const catalogueManufacturer = catalogue.find((maker) => maker.id === catalogueManufacturerId) ?? null;
+  const catalogueModels = useMemo(() => catalogueManufacturer?.models ?? [], [catalogueManufacturer]);
+  const catalogueVehicle = catalogueModels.find((model) => model.id === catalogueModelId) ?? null;
+  const activeAsset: ModelAsset | CatalogueAsset | null = selectionSource === 'catalogue'
+    ? catalogueVehicle?.asset ?? null
+    : data?.model_asset ?? null;
+  const rawAssetStatus: AssetAvailability = selectionSource === 'catalogue'
+    ? catalogueVehicle?.asset?.availability_status ?? 'missing'
+    : data?.asset_status ?? data?.model_asset?.availability_status ?? 'missing';
+  const effectiveAssetStatus: AssetAvailability = rawAssetStatus === 'representative_only' && allowRepresentative
+    ? 'available'
+    : rawAssetStatus;
+  const modelPath = effectiveAssetStatus === 'available' && activeAsset ? activeAsset.model_path : null;
+  const shadowPath = effectiveAssetStatus === 'available' ? activeAsset?.shadow_path ?? null : null;
+  const availableViewModes = useMemo<ViewerMode[]>(() => activeAsset?.available_view_modes
+    ?? (selectionSource === 'registered' ? data?.available_view_modes ?? [] : []),
+  [activeAsset, selectionSource, data?.available_view_modes]);
+  const activeNodeMap = activeAsset?.node_map;
+  const nodeMapJson = activeAsset?.node_map_json;
   const nodeMap = useMemo<Record<string, ComponentKey>>(() => {
-    if (!data?.model_asset?.node_map_json) return {};
+    if (activeNodeMap && Object.keys(activeNodeMap).length > 0) return activeNodeMap;
+    if (!nodeMapJson) return {};
     try {
-      const parsed: unknown = JSON.parse(data.model_asset.node_map_json);
+      const parsed: unknown = JSON.parse(nodeMapJson);
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
       const result: Record<string, ComponentKey> = {};
       for (const [node, key] of Object.entries(parsed)) {
@@ -300,7 +394,32 @@ export const SmartWorkshopView: React.FC<Props> = ({ onViewRepair }) => {
     } catch {
       return {};
     }
-  }, [data?.model_asset?.node_map_json]);
+  }, [nodeMapJson, activeNodeMap]);
+
+  const displayVehicle: DisplayVehicle | null = selectionSource === 'catalogue'
+    ? {
+        id: '',
+        customer_id: '',
+        mileage: 0,
+        registration_number: 'Not registered',
+        make: catalogueManufacturer?.name ?? 'Not recorded',
+        model: catalogueVehicle?.name ?? 'Not recorded',
+        model_year: catalogueYear ? Number(catalogueYear) : null,
+        vin: null as string | null,
+        engine_number: null as string | null,
+        customer_name: null as string | null,
+        engine_type: catalogueEngine || null,
+        engine_capacity_cc: null as number | null,
+        fuel_type: null as string | null,
+        transmission_type: null as string | null,
+        drive_type: null as string | null,
+      }
+    : data?.vehicle ?? null;
+  const selectedVehicleLabel = displayVehicle
+    ? `${displayVehicle.make} ${displayVehicle.model}`.trim()
+    : 'No vehicle selected';
+  const selectedVehicleYear = displayVehicle?.model_year ?? 'Year not recorded';
+  const activeAssetLabel = activeAsset?.label ?? selectedVehicleLabel;
 
   const loadVehicles = useCallback(async (query = '', selectFirst = false) => {
     const params = new URLSearchParams({ limit: '100', sort: 'created_at', order: 'desc' });
@@ -326,6 +445,41 @@ export const SmartWorkshopView: React.FC<Props> = ({ onViewRepair }) => {
       setSearchingVehicles(false);
     }
   };
+
+  const loadCatalogue = useCallback(async () => {
+    setCatalogueLoading(true);
+    setError('');
+    try {
+      const response = await apiFetch('/api/smart-workshop/catalogue/vehicles');
+      const result = await response.json() as ApiResult<never> & { manufacturers?: CatalogueManufacturer[] };
+      if (!response.ok) throw new Error(errorMessage(result, 'Could not load the vehicle catalogue.'));
+      const manufacturers = result.manufacturers ?? [];
+      setCatalogue(manufacturers);
+      setCatalogueManufacturerId((current) => current || manufacturers[0]?.id || '');
+      setCatalogueModelId((current) => current || manufacturers[0]?.models[0]?.id || '');
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : 'Could not load the vehicle catalogue.');
+    } finally {
+      setCatalogueLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (catalogue.length > 0) return;
+    void loadCatalogue();
+  }, [catalogue.length, loadCatalogue]);
+
+  useEffect(() => {
+    const firstModel = catalogueModels[0]?.id ?? '';
+    setCatalogueModelId((current) => catalogueModels.some((model) => model.id === current) ? current : firstModel);
+    setCatalogueYear('');
+    setCatalogueVariant('');
+    setCatalogueEngine('');
+  }, [catalogueManufacturerId, catalogueModels]);
+
+  useEffect(() => {
+    if (!availableViewModes.includes(mode)) setMode('exterior');
+  }, [availableViewModes, mode]);
 
   const refresh = useCallback(async (showSpinner: boolean) => {
     if (!vehicleId) {
@@ -373,6 +527,13 @@ export const SmartWorkshopView: React.FC<Props> = ({ onViewRepair }) => {
     void refresh(false);
   }, [vehicleId, refresh]);
 
+  useEffect(() => {
+    setActiveDiagnosis(null);
+    setSelected(null);
+    setRelatedJobId('');
+    setInspectionJobId('');
+  }, [selectionSource, catalogueModelId]);
+
   const chooseComponent = useCallback((key: ComponentKey | null) => {
     setSelected(key);
     if (key) setInspectionComponent(key);
@@ -380,6 +541,10 @@ export const SmartWorkshopView: React.FC<Props> = ({ onViewRepair }) => {
 
   const runDiagnosis = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (selectionSource === 'catalogue') {
+      setError('AI fault analysis requires a registered vehicle. Switch to a registered vehicle first.');
+      return;
+    }
     if (!vehicleId) return;
     if (symptoms.trim().length < 10) {
       setError('Enter at least 10 characters describing the reported symptoms.');
@@ -417,7 +582,7 @@ export const SmartWorkshopView: React.FC<Props> = ({ onViewRepair }) => {
   };
 
   const saveReview = async (reviewStatus: 'confirmed' | 'corrected' | 'dismissed') => {
-    if (!activeDiagnosis) return;
+    if (selectionSource === 'catalogue' || !activeDiagnosis) return;
     const verifiedFault = confirmedFault === 'Other mechanic finding' ? customFault.trim() : confirmedFault;
     if (reviewStatus !== 'dismissed' && verifiedFault.length < 2) {
       setError('Enter the fault found during inspection before saving this review.');
@@ -455,7 +620,7 @@ export const SmartWorkshopView: React.FC<Props> = ({ onViewRepair }) => {
   };
 
   const createRepair = async () => {
-    if (!activeDiagnosis || !data?.vehicle || !activeDiagnosis.confirmed_fault || activeDiagnosis.job_id) return;
+    if (selectionSource === 'catalogue' || !activeDiagnosis || !data?.vehicle || !activeDiagnosis.confirmed_fault || activeDiagnosis.job_id) return;
     setBusy(true);
     setError('');
     try {
@@ -485,6 +650,10 @@ export const SmartWorkshopView: React.FC<Props> = ({ onViewRepair }) => {
 
   const saveInspection = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (selectionSource === 'catalogue') {
+      setError('Inspection findings can only be recorded against a registered vehicle.');
+      return;
+    }
     if (!vehicleId) return;
     setBusy(true);
     setError('');
@@ -513,23 +682,44 @@ export const SmartWorkshopView: React.FC<Props> = ({ onViewRepair }) => {
     }
   };
 
+  const linkCatalogueModel = async (modelId: string) => {
+    if (!vehicleId) return;
+    setLinkingCatalogue(true);
+    setError('');
+    try {
+      const response = await apiFetch(`/api/smart-workshop/vehicles/${encodeURIComponent(vehicleId)}/catalogue-link`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ catalogue_model_id: modelId || null }),
+      });
+      const result = await response.json() as ApiResult<never>;
+      if (!response.ok) throw new Error(errorMessage(result, 'Could not link the catalogue model.'));
+      setNotice(modelId ? 'Catalogue model linked. The matching 3D asset is now used when available.' : 'Catalogue model link removed.');
+      await refresh(true);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Could not link the catalogue model.');
+    } finally {
+      setLinkingCatalogue(false);
+    }
+  };
+
   const componentRepairs = useMemo(() => {
-    if (!selected || !data) return [];
+    if (selectionSource === 'catalogue' || !selected || !data) return [];
     const component = SMART_WORKSHOP_CONFIG.components.find((entry) => entry.key === selected);
     if (!component) return [];
     return data.repairs.filter((repair) => {
       const text = `${repair.service_type ?? ''} ${repair.issue_description ?? ''}`.toLowerCase();
       return component.label.toLowerCase().split(/[\s/]+/).some((token) => token.length > 3 && text.includes(token));
     });
-  }, [data, selected]);
+  }, [data, selected, selectionSource]);
 
   const componentDiagnoses = useMemo(() => {
-    if (!selected || !data) return [];
+    if (selectionSource === 'catalogue' || !selected || !data) return [];
     return data.diagnoses.filter((entry) => {
       const faultComponent = componentForFault(entry.confirmed_fault ?? entry.predicted_fault);
       return entry.affected_component === selected || faultComponent === selected;
     });
-  }, [data, selected]);
+  }, [data, selected, selectionSource]);
 
   const counts = useMemo(() => {
     const values = Object.values(statuses);
@@ -541,6 +731,16 @@ export const SmartWorkshopView: React.FC<Props> = ({ onViewRepair }) => {
     };
   }, [statuses]);
 
+  const contextSpecificationFields: SpecificationField[] = selectionSource === 'catalogue'
+    ? [
+        { label: 'Engine type', value: displayVehicle?.engine_type ?? null },
+        { label: 'Engine capacity', value: displayVehicle?.engine_capacity_cc ?? null },
+        { label: 'Fuel type', value: displayVehicle?.fuel_type ?? null },
+        { label: 'Transmission', value: displayVehicle?.transmission_type ?? null },
+        { label: 'Drive type', value: displayVehicle?.drive_type ?? null },
+      ]
+    : data?.specifications?.fields ?? [];
+
   return (
     <section className="mx-auto w-full max-w-[1600px] space-y-5">
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -550,76 +750,220 @@ export const SmartWorkshopView: React.FC<Props> = ({ onViewRepair }) => {
             <Box className="h-6 w-6 text-blue-600 dark:text-blue-400" /> AI Smart Workshop
           </h1>
           <p className="mt-1 max-w-3xl text-sm text-slate-500 dark:text-slate-400">
-            Interactive 3D inspection linked to this vehicle's records. AI output is a suggestion that a qualified mechanic must verify.
+            Select a registered vehicle or explore the central catalogue. The 3D model, vehicle information and AI context follow the active selection.
           </p>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <form onSubmit={(event) => void searchVehicles(event)} className="flex items-center gap-2">
-            <input
-              aria-label="Search vehicles by registration or customer"
-              value={vehicleQuery}
-              onChange={(event) => setVehicleQuery(event.target.value)}
-              placeholder="Registration or customer"
-              className="w-56 rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-900 outline-none focus:border-blue-500 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
-            />
-            <button
-              type="submit"
-              disabled={searchingVehicles}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 px-3 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
-            >
-              <Search className="h-4 w-4" /> {searchingVehicles ? 'Searching…' : 'Search'}
-            </button>
-          </form>
-          <select
-            aria-label="Select vehicle"
-            value={vehicleId}
-            onChange={(event) => setVehicleId(event.target.value)}
-            className="min-w-64 rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm font-medium text-slate-900 outline-none focus:border-blue-500 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
-          >
-            {vehicles.length === 0 && <option value="">No vehicles registered</option>}
-            {vehicles.map((vehicle) => (
-              <option key={vehicle.id} value={vehicle.id}>
-                {vehicle.registration_number} · {vehicle.make} {vehicle.model}{vehicle.owner_name ? ` · ${vehicle.owner_name}` : ''}
-              </option>
-            ))}
-          </select>
-          <button
-            type="button"
-            onClick={() => void refresh(true)}
-            disabled={!vehicleId || refreshing}
-            className="inline-flex items-center gap-2 rounded-lg border border-slate-300 px-3 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
-          >
-            <RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} /> Refresh
-          </button>
+        <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-right shadow-sm dark:border-slate-800 dark:bg-slate-900">
+          <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-400">Active selection</p>
+          <p className="mt-0.5 text-sm font-bold text-slate-900 dark:text-white">{selectedVehicleLabel}</p>
+          <p className="text-xs text-slate-500">{selectedVehicleYear} · {selectionSource === 'registered' ? 'Registered vehicle' : 'Catalogue exploration'}</p>
         </div>
       </div>
+
+      <section aria-label="Vehicle selection" className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="inline-flex rounded-lg bg-slate-100 p-1 dark:bg-slate-800">
+            <button
+              type="button"
+              onClick={() => { setSelectionSource('registered'); setAllowRepresentative(false); }}
+              className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${selectionSource === 'registered' ? 'bg-blue-600 text-white shadow' : 'text-slate-600 dark:text-slate-300'}`}
+            >
+              <CarFront className="mr-1 inline h-3.5 w-3.5" /> Registered vehicle
+            </button>
+            <button
+              type="button"
+              onClick={() => { setSelectionSource('catalogue'); setAllowRepresentative(false); }}
+              className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${selectionSource === 'catalogue' ? 'bg-blue-600 text-white shadow' : 'text-slate-600 dark:text-slate-300'}`}
+            >
+              <Database className="mr-1 inline h-3.5 w-3.5" /> Catalogue exploration
+            </button>
+          </div>
+          <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+            {selectionSource === 'registered'
+              ? 'Uses workshop vehicle records and AI context'
+              : 'Reference vehicle only — no workshop records or AI prediction'}
+          </span>
+        </div>
+
+        {selectionSource === 'registered' ? (
+          <div className="mt-4 flex flex-wrap items-end gap-3">
+            <form onSubmit={(event) => void searchVehicles(event)} className="flex items-end gap-2">
+              <div>
+                <label htmlFor="smart-vehicle-search" className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">Find registered vehicle</label>
+                <input
+                  id="smart-vehicle-search"
+                  value={vehicleQuery}
+                  onChange={(event) => setVehicleQuery(event.target.value)}
+                  placeholder="Registration or customer"
+                  className="mt-1 w-56 rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-900 outline-none focus:border-blue-500 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={searchingVehicles}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 px-3 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+              >
+                <Search className="h-4 w-4" /> {searchingVehicles ? 'Searching…' : 'Search'}
+              </button>
+            </form>
+            <div className="min-w-64 flex-1">
+              <label htmlFor="smart-registered-vehicle" className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">Vehicle from Vehicle Management</label>
+              <select
+                id="smart-registered-vehicle"
+                aria-label="Select registered vehicle"
+                value={vehicleId}
+                onChange={(event) => setVehicleId(event.target.value)}
+                className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm font-medium text-slate-900 outline-none focus:border-blue-500 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+              >
+                {vehicles.length === 0 && <option value="">No vehicles registered</option>}
+                {vehicles.map((vehicle) => (
+                  <option key={vehicle.id} value={vehicle.id}>
+                    {vehicle.registration_number} · {vehicle.make} {vehicle.model}{vehicle.owner_name ? ` · ${vehicle.owner_name}` : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <button
+              type="button"
+              onClick={() => void refresh(true)}
+              disabled={!vehicleId || refreshing}
+              className="inline-flex items-center gap-2 rounded-lg border border-slate-300 px-3 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+            >
+              <RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} /> Refresh
+            </button>
+          </div>
+        ) : (
+          <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+            <div>
+              <label htmlFor="catalogue-manufacturer" className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">Manufacturer</label>
+              <select
+                id="catalogue-manufacturer"
+                value={catalogueManufacturerId}
+                onChange={(event) => setCatalogueManufacturerId(event.target.value)}
+                disabled={catalogueLoading}
+                className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm font-medium text-slate-900 outline-none focus:border-blue-500 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+              >
+                {catalogue.length === 0 && <option value="">{catalogueLoading ? 'Loading…' : 'No catalogue manufacturers'}</option>}
+                {catalogue.map((maker) => <option key={maker.id} value={maker.id}>{maker.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <label htmlFor="catalogue-model" className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">Model</label>
+              <select
+                id="catalogue-model"
+                value={catalogueModelId}
+                onChange={(event) => { setCatalogueModelId(event.target.value); setCatalogueYear(''); setCatalogueVariant(''); setCatalogueEngine(''); }}
+                disabled={!catalogueManufacturerId || catalogueModels.length === 0}
+                className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm font-medium text-slate-900 outline-none focus:border-blue-500 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+              >
+                {catalogueModels.length === 0 && <option value="">No models recorded</option>}
+                {catalogueModels.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <label htmlFor="catalogue-year" className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">Manufacturing year</label>
+              <select
+                id="catalogue-year"
+                value={catalogueYear}
+                onChange={(event) => setCatalogueYear(event.target.value)}
+                disabled={!catalogueVehicle || catalogueVehicle.years.length === 0}
+                className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm font-medium text-slate-900 outline-none focus:border-blue-500 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+              >
+                <option value="">{catalogueVehicle?.years.length ? 'Select year' : 'Not recorded'}</option>
+                {catalogueVehicle?.years.map((year) => <option key={year} value={year}>{year}</option>)}
+              </select>
+            </div>
+            <div>
+              <label htmlFor="catalogue-variant" className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">Variant</label>
+              <select
+                id="catalogue-variant"
+                value={catalogueVariant}
+                onChange={(event) => setCatalogueVariant(event.target.value)}
+                disabled={!catalogueVehicle || catalogueVehicle.variants.length === 0}
+                className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm font-medium text-slate-900 outline-none focus:border-blue-500 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+              >
+                <option value="">{catalogueVehicle?.variants.length ? 'Select variant' : 'Not recorded'}</option>
+                {catalogueVehicle?.variants.map((variant) => <option key={variant} value={variant}>{variant}</option>)}
+              </select>
+            </div>
+            <div>
+              <label htmlFor="catalogue-engine" className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">Engine type</label>
+              <select
+                id="catalogue-engine"
+                value={catalogueEngine}
+                onChange={(event) => setCatalogueEngine(event.target.value)}
+                disabled={!catalogueVehicle || catalogueVehicle.engines.length === 0}
+                className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm font-medium text-slate-900 outline-none focus:border-blue-500 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+              >
+                <option value="">{catalogueVehicle?.engines.length ? 'Select engine' : 'Not recorded'}</option>
+                {catalogueVehicle?.engines.map((engine) => <option key={engine} value={engine}>{engine}</option>)}
+              </select>
+            </div>
+          </div>
+        )}
+
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-3 text-[11px] text-slate-500 dark:border-slate-800 dark:text-slate-400">
+          <span>
+            {catalogueLoading && selectionSource === 'catalogue' ? 'Loading catalogue…' : `3D asset: ${activeAsset?.label ?? 'Not configured'}`}
+            {' · '}<span className={effectiveAssetStatus === 'available' ? 'font-semibold text-emerald-600 dark:text-emerald-300' : 'font-semibold text-amber-600 dark:text-amber-300'}>{effectiveAssetStatus.replaceAll('_', ' ')}</span>
+          </span>
+          {rawAssetStatus === 'representative_only' && (
+            <label className="inline-flex items-center gap-2">
+              <input type="checkbox" checked={allowRepresentative} onChange={(event) => setAllowRepresentative(event.target.checked)} className="accent-amber-500" />
+              Show labelled representative illustration only
+            </label>
+          )}
+        </div>
+      </section>
 
       <div role="alert" className="flex items-start gap-3 rounded-xl border-l-4 border-amber-500 bg-amber-50 p-4 text-sm text-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
         <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0" />
         <p>
           <strong>Professional verification required.</strong> AI predictions are not diagnoses or verified failure probabilities, and confidence is calibrated only against synthetic grouped holdout data. A qualified mechanic must confirm findings before repair decisions.
-          The 3D body is a licensed generic illustration; internal components are a procedural inspection assembly, not an exact replica of this vehicle.
+          {effectiveAssetStatus === 'available' && activeAsset?.is_exact_match
+            ? ' The selected 3D asset is declared model-specific; verify its version and component nodes against the vehicle. Internal inspection geometry remains procedural unless verified nodes are provided.'
+            : effectiveAssetStatus === 'available'
+              ? ' The 3D body is a licensed generic illustration, shown only because representative display was explicitly enabled; internal components are a procedural inspection assembly, not an exact replica of this vehicle.'
+              : ' No verified model-specific 3D asset is available and no different vehicle is shown in its place. Internal components are a procedural inspection assembly, not an exact replica of this vehicle.'}
         </p>
       </div>
 
-      {data?.model_asset && (
+      {(activeAsset || selectionSource === 'catalogue') && (
         <div className="flex flex-wrap items-start justify-between gap-3 rounded-xl border border-slate-200 bg-white p-4 text-xs text-slate-600 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300">
           <div>
             <p className="font-semibold text-slate-900 dark:text-white">
-              3D asset: {data.model_asset.label} · {data.model_asset.is_exact_match === 1 || data.model_asset.is_exact_match === true ? 'Declared exact model match' : 'Representative substitute'}
+              3D asset: {activeAsset?.label ?? 'No asset configured'} · {activeAsset?.is_exact_match ? 'Declared model-specific match' : 'Not an exact model match'}
             </p>
-            <p className="mt-1">
-              License: {data.model_asset.license}
-              {data.model_asset.license_url && (
-                <> · <a href={data.model_asset.license_url} target="_blank" rel="noreferrer" className="font-semibold text-blue-600 hover:underline dark:text-blue-400">License details</a></>
-              )}
-              {' · '}Source: {data.model_asset.source}
-            </p>
-            {data.model_asset.notes && <p className="mt-1 text-slate-500">{data.model_asset.notes}</p>}
-            {data.catalogue_model?.specification_note && <p className="mt-1 text-slate-500">{data.catalogue_model.specification_note}</p>}
+            {activeAsset ? (
+              <>
+                <p className="mt-1">
+                  Path: <span className="font-mono">{activeAsset.model_path}</span> · Status: {rawAssetStatus.replaceAll('_', ' ')}
+                </p>
+                <p className="mt-1">
+                  License: {activeAsset.license}
+                  {activeAsset.license_url && (
+                    <> · <a href={activeAsset.license_url} target="_blank" rel="noreferrer" className="font-semibold text-blue-600 hover:underline dark:text-blue-400">License details</a></>
+                  )}
+                  {' · '}Source: {activeAsset.source}
+                </p>
+                {activeAsset.notes && <p className="mt-1 text-slate-500">{activeAsset.notes}</p>}
+              </>
+            ) : (
+              <p className="mt-1">No 3D asset file is registered for this catalogue model. Add a licensed GLB/GLTF file through catalogue administration.</p>
+            )}
+            {selectionSource === 'registered' && data?.catalogue_model?.specification_note && (
+              <p className="mt-1 text-slate-500">{data.catalogue_model.specification_note}</p>
+            )}
+            {selectionSource === 'catalogue' && catalogueVehicle?.specification_note && (
+              <p className="mt-1 text-slate-500">{catalogueVehicle.specification_note}</p>
+            )}
           </div>
           <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-slate-700 dark:bg-slate-800 dark:text-slate-200">
-            {data.catalogue_model ? `${data.catalogue_model.manufacturer_name ?? ''} ${data.catalogue_model.name}` : 'No catalogue model match'}
+            {selectionSource === 'catalogue'
+              ? `${catalogueManufacturer?.name ?? ''} ${catalogueVehicle?.name ?? ''}`.trim() || 'No catalogue model'
+              : data?.catalogue_model
+                ? `${data.catalogue_model.manufacturer_name ?? ''} ${data.catalogue_model.name}`
+                : 'No catalogue model match'}
           </span>
         </div>
       )}
@@ -637,16 +981,20 @@ export const SmartWorkshopView: React.FC<Props> = ({ onViewRepair }) => {
         </div>
       )}
 
-      {loading && !data ? (
+      {(selectionSource === 'registered' ? loading && !data : catalogueLoading && !catalogueVehicle) ? (
         <div className="grid min-h-96 place-items-center rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
           <div className="flex items-center gap-3 text-sm text-slate-500"><LoaderCircle className="h-5 w-5 animate-spin" /> Loading Smart Workshop…</div>
         </div>
-      ) : !vehicleId || !data ? (
+      ) : !displayVehicle ? (
         <div className="grid min-h-96 place-items-center rounded-2xl border border-dashed border-slate-300 bg-white p-6 text-center dark:border-slate-700 dark:bg-slate-900">
           <div>
             <CarFront className="mx-auto h-10 w-10 text-slate-300" />
             <p className="mt-3 font-semibold text-slate-900 dark:text-white">No vehicle selected</p>
-            <p className="mt-1 text-sm text-slate-500">Register a vehicle in Vehicle Management to start a 3D inspection.</p>
+            <p className="mt-1 text-sm text-slate-500">
+              {selectionSource === 'registered'
+                ? 'Register a vehicle in Vehicle Management to start a 3D inspection.'
+                : 'Choose a manufacturer and model from the central catalogue.'}
+            </p>
           </div>
         </div>
       ) : (
@@ -654,8 +1002,9 @@ export const SmartWorkshopView: React.FC<Props> = ({ onViewRepair }) => {
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-6">
             <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
               <p className="text-xs font-medium text-slate-500 dark:text-slate-400">Vehicle</p>
-              <p className="mt-1 truncate text-lg font-bold text-slate-900 dark:text-white">{data.vehicle.registration_number}</p>
-              <p className="truncate text-xs text-slate-500">{data.vehicle.make} {data.vehicle.model} · {data.vehicle.model_year}</p>
+              <p className="mt-1 truncate text-lg font-bold text-slate-900 dark:text-white">{displayVehicle.registration_number}</p>
+              <p className="truncate text-xs text-slate-500">{selectedVehicleLabel} · {selectedVehicleYear}</p>
+              {catalogueVariant && <p className="truncate text-xs text-slate-500">{catalogueVariant}</p>}
             </div>
             {(['green', 'orange', 'red', 'grey'] as WorkshopStatus[]).map((status) => (
               <div key={status} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
@@ -672,7 +1021,7 @@ export const SmartWorkshopView: React.FC<Props> = ({ onViewRepair }) => {
                 <Wrench className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
                 <p className="text-xs font-medium text-blue-700 dark:text-blue-300">Responsible mechanic</p>
               </div>
-              {data.active_assignment ? (
+              {data?.active_assignment ? (
                 <>
                   <p className="mt-1 truncate text-sm font-bold text-slate-900 dark:text-white">{data.active_assignment.mechanic_name ?? data.active_assignment.user_name ?? 'Unassigned'}</p>
                   <p className="truncate text-xs text-slate-600 dark:text-slate-300">{data.active_assignment.mechanic_number ?? '—'} · {data.active_assignment.specialization ?? 'Mechanic'}</p>
@@ -681,7 +1030,9 @@ export const SmartWorkshopView: React.FC<Props> = ({ onViewRepair }) => {
                   </button>
                 </>
               ) : (
-                <p className="mt-2 text-xs text-slate-600 dark:text-slate-300">No mechanic assigned to a repair for this vehicle yet.</p>
+                <p className="mt-2 text-xs text-slate-600 dark:text-slate-300">
+                  {selectionSource === 'catalogue' ? 'Catalogue vehicle — no workshop assignment exists.' : 'No mechanic assigned to a repair for this vehicle yet.'}
+                </p>
               )}
             </div>
           </div>
@@ -692,16 +1043,21 @@ export const SmartWorkshopView: React.FC<Props> = ({ onViewRepair }) => {
                 <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 p-4 dark:border-slate-800">
                   <div className="flex flex-wrap items-center gap-2">
                     <div className="inline-flex flex-wrap rounded-lg bg-slate-100 p-1 dark:bg-slate-800">
-                      {VIEW_OPTIONS.map((item) => (
-                        <button
-                          key={item.key}
-                          type="button"
-                          onClick={() => setMode(item.key)}
-                          className={`rounded-md px-3 py-1.5 text-xs font-semibold transition ${mode === item.key ? 'bg-blue-600 text-white shadow' : 'text-slate-600 hover:text-slate-900 dark:text-slate-300'}`}
-                        >
-                          {item.label}
-                        </button>
-                      ))}
+                      {VIEW_OPTIONS.map((item) => {
+                        const supported = item.key === 'mechanical' || item.key === 'exploded' || availableViewModes.includes(item.key);
+                        return (
+                          <button
+                            key={item.key}
+                            type="button"
+                            onClick={() => setMode(item.key)}
+                            disabled={!supported}
+                            title={supported ? item.label : `${item.label} view is not available for this asset`}
+                            className={`rounded-md px-3 py-1.5 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-40 ${mode === item.key ? 'bg-blue-600 text-white shadow' : 'text-slate-600 hover:text-slate-900 dark:text-slate-300'}`}
+                          >
+                            {item.label}
+                          </button>
+                        );
+                      })}
                     </div>
                     <label className="flex items-center gap-2 text-[11px] text-slate-600 dark:text-slate-300">
                       <input type="checkbox" checked={focusSelected} onChange={(event) => setFocusSelected(event.target.checked)} className="accent-blue-600" />
@@ -737,7 +1093,11 @@ export const SmartWorkshopView: React.FC<Props> = ({ onViewRepair }) => {
                       resetToken={resetToken}
                       onSelect={chooseComponent}
                       modelPath={modelPath}
+                      shadowPath={shadowPath}
                       nodeMap={nodeMap}
+                      assetStatus={effectiveAssetStatus}
+                      assetLabel={activeAssetLabel}
+                      availableViewModes={availableViewModes}
                       focusSelected={focusSelected}
                       selectedLabel={selectedComponent?.label ?? null}
                     />
@@ -759,7 +1119,13 @@ export const SmartWorkshopView: React.FC<Props> = ({ onViewRepair }) => {
                     <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">Runs the existing trained classifier and saves every suggestion for review.</p>
                   </div>
                 </div>
-                <form onSubmit={runDiagnosis} className="mt-4 space-y-4">
+                {selectionSource === 'catalogue' && (
+                  <div className="mt-3 rounded-lg border border-blue-200 bg-blue-50 p-3 text-xs text-blue-800 dark:border-blue-900 dark:bg-blue-950/30 dark:text-blue-200">
+                    AI fault analysis uses the selected registered vehicle's actual records. Switch to a registered vehicle to run it; catalogue exploration does not create predictions.
+                  </div>
+                )}
+                <form onSubmit={runDiagnosis} className="mt-4">
+                  <fieldset disabled={selectionSource === 'catalogue'} className="space-y-4 disabled:opacity-50">
                   <div>
                     <label htmlFor="smart-symptoms" className="text-xs font-semibold text-slate-600 dark:text-slate-300">Reported symptoms</label>
                     <textarea
@@ -796,7 +1162,7 @@ export const SmartWorkshopView: React.FC<Props> = ({ onViewRepair }) => {
                       className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-700 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200"
                     >
                       <option value="">No related repair job</option>
-                      {(data.repairs ?? []).map((repair) => (
+                      {(data?.repairs ?? []).map((repair) => (
                         <option key={repair.id} value={repair.id}>{repair.repair_job_code} · {repair.service_type}</option>
                       ))}
                     </select>
@@ -808,6 +1174,7 @@ export const SmartWorkshopView: React.FC<Props> = ({ onViewRepair }) => {
                   >
                     {busy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <ScanSearch className="h-4 w-4" />} Run fault analysis
                   </button>
+                  </fieldset>
                 </form>
 
                 {activeDiagnosis && (
@@ -956,19 +1323,19 @@ export const SmartWorkshopView: React.FC<Props> = ({ onViewRepair }) => {
               <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
                 <h2 className="flex items-center gap-2 text-sm font-bold text-slate-900 dark:text-white"><CarFront className="h-4 w-4 text-blue-600 dark:text-blue-400" /> Vehicle context</h2>
                 <div className="mt-3 grid gap-2 text-xs sm:grid-cols-2">
-                  <div><p className="text-slate-500">Registration</p><p className="font-semibold text-slate-900 dark:text-white">{data.vehicle.registration_number}</p></div>
-                  <div><p className="text-slate-500">Customer</p><p className="font-semibold text-slate-900 dark:text-white">{data.vehicle.customer_name ?? 'Not recorded'}</p></div>
-                  <div className="sm:col-span-2"><p className="text-slate-500">Registered vehicle</p><p className="font-semibold text-slate-900 dark:text-white">{data.vehicle.make} {data.vehicle.model} · {data.vehicle.model_year}</p></div>
-                  <div><p className="text-slate-500">VIN / chassis</p><p className="font-mono text-[11px] text-slate-700 dark:text-slate-200">{data.vehicle.vin ?? 'Not recorded'}</p></div>
-                  <div><p className="text-slate-500">Engine number</p><p className="font-mono text-[11px] text-slate-700 dark:text-slate-200">{data.vehicle.engine_number ?? 'Not recorded'}</p></div>
+                  <div><p className="text-slate-500">Registration</p><p className="font-semibold text-slate-900 dark:text-white">{displayVehicle?.registration_number ?? 'Not recorded'}</p></div>
+                  <div><p className="text-slate-500">Customer</p><p className="font-semibold text-slate-900 dark:text-white">{displayVehicle?.customer_name ?? 'Not recorded'}</p></div>
+                  <div className="sm:col-span-2"><p className="text-slate-500">Manufacturer / model / year</p><p className="font-semibold text-slate-900 dark:text-white">{selectedVehicleLabel} · {selectedVehicleYear}</p>{catalogueVariant && <p className="text-slate-500">{catalogueVariant}</p>}</div>
+                  <div><p className="text-slate-500">VIN / chassis</p><p className="font-mono text-[11px] text-slate-700 dark:text-slate-200">{displayVehicle?.vin ?? 'Not recorded'}</p></div>
+                  <div><p className="text-slate-500">Engine number</p><p className="font-mono text-[11px] text-slate-700 dark:text-slate-200">{displayVehicle?.engine_number ?? 'Not recorded'}</p></div>
                 </div>
                 <div className="mt-4 border-t border-slate-200 pt-4 dark:border-slate-800">
                   <div className="flex items-center justify-between gap-3">
                     <p className="text-xs font-semibold text-slate-700 dark:text-slate-200">Specifications</p>
-                    <span className="text-[10px] text-slate-500">Vehicle record first, then catalogue</span>
+                    <span className="text-[10px] text-slate-500">{selectionSource === 'registered' ? 'Vehicle record first, then catalogue' : 'Catalogue data only'}</span>
                   </div>
                   <div className="mt-2 grid gap-2 sm:grid-cols-2">
-                    {(data.specifications?.fields ?? []).map((field) => (
+                    {contextSpecificationFields.map((field) => (
                       <div key={field.label} className="rounded-lg bg-slate-50 p-2 dark:bg-slate-950/60">
                         <p className="text-[10px] text-slate-500">{field.label}</p>
                         <p className={`text-xs font-semibold ${field.value === null || field.value === undefined || field.value === '' ? 'text-amber-600 dark:text-amber-300' : 'text-slate-800 dark:text-slate-100'}`}>
@@ -977,29 +1344,56 @@ export const SmartWorkshopView: React.FC<Props> = ({ onViewRepair }) => {
                       </div>
                     ))}
                   </div>
-                  {(data.specifications?.missing?.length ?? 0) > 0 && (
+                  {(data?.specifications?.missing?.length ?? 0) > 0 && (
                     <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-2 text-[11px] text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
-                      Missing: {data.specifications?.missing.join(', ')}. {data.specifications?.note}
+                      Missing: {data?.specifications?.missing.join(', ')}. {data?.specifications?.note}
                     </p>
                   )}
                 </div>
+                {selectionSource === 'registered' && canManage && (
+                  <div className="mt-4 border-t border-slate-200 pt-4 dark:border-slate-800">
+                    <label htmlFor="catalogue-link" className="text-xs font-semibold text-slate-700 dark:text-slate-200">Catalogue model link</label>
+                    <p className="mt-1 text-[11px] text-slate-500">Linking an existing vehicle selects its matching 3D asset without re-registering the vehicle.</p>
+                    <div className="mt-2 flex gap-2">
+                      <select
+                        id="catalogue-link"
+                        value={data?.catalogue_model?.id ?? ''}
+                        onChange={(event) => void linkCatalogueModel(event.target.value)}
+                        disabled={linkingCatalogue || catalogue.length === 0}
+                        className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-800 dark:border-slate-700 dark:bg-slate-950 dark:text-white"
+                      >
+                        <option value="">No catalogue link</option>
+                        {catalogue.flatMap((maker) => maker.models).map((model) => (
+                          <option key={model.id} value={model.id}>{model.manufacturer_name} {model.name}</option>
+                        ))}
+                      </select>
+                      {linkingCatalogue && <LoaderCircle className="h-5 w-5 animate-spin text-blue-600" />}
+                    </div>
+                  </div>
+                )}
                 <div className="mt-4 border-t border-slate-200 pt-4 dark:border-slate-800">
                   <p className="text-xs font-semibold text-slate-700 dark:text-slate-200">Prior workshop records</p>
-                  {(data.repairs ?? []).length === 0 && (data.diagnoses ?? []).length === 0 && <p className="mt-2 text-xs text-slate-500">No previous repairs or AI assessments found for this vehicle.</p>}
-                  <div className="mt-2 max-h-44 space-y-1.5 overflow-y-auto pr-1">
-                    {(data.repairs ?? []).slice(0, 6).map((repair) => (
-                      <button key={repair.id} type="button" onClick={() => onViewRepair(repair.id)} className="flex w-full items-center justify-between gap-2 rounded-lg border border-slate-200 p-2 text-left text-[11px] hover:border-blue-300 dark:border-slate-800">
-                        <span><span className="font-mono font-semibold">{repair.repair_job_code}</span> · {repair.service_type}</span>
-                        <span className="text-slate-500">{repair.repair_status}</span>
-                      </button>
-                    ))}
-                    {(data.diagnoses ?? []).slice(0, 4).map((diagnosis) => (
-                      <button key={diagnosis.id} type="button" onClick={() => { setActiveDiagnosis(diagnosis); setConfirmedFault(diagnosis.confirmed_fault ?? diagnosis.predicted_fault); }} className="block w-full rounded-lg border border-violet-200 p-2 text-left text-[11px] hover:border-violet-400 dark:border-violet-900">
-                        <span className="font-semibold text-violet-700 dark:text-violet-300">{diagnosis.confirmed_fault ?? diagnosis.predicted_fault}</span>
-                        <span className="block text-slate-500">{formatDate(diagnosis.created_at)} · {diagnosis.review_status}</span>
-                      </button>
-                    ))}
-                  </div>
+                  {selectionSource === 'catalogue' ? (
+                    <p className="mt-2 text-xs text-slate-500">Catalogue vehicle — no workshop records apply to this reference selection.</p>
+                  ) : (
+                    <>
+                      {(data?.repairs ?? []).length === 0 && (data?.diagnoses ?? []).length === 0 && <p className="mt-2 text-xs text-slate-500">No previous repairs or AI assessments found for this vehicle.</p>}
+                      <div className="mt-2 max-h-44 space-y-1.5 overflow-y-auto pr-1">
+                        {(data?.repairs ?? []).slice(0, 6).map((repair) => (
+                          <button key={repair.id} type="button" onClick={() => onViewRepair(repair.id)} className="flex w-full items-center justify-between gap-2 rounded-lg border border-slate-200 p-2 text-left text-[11px] hover:border-blue-300 dark:border-slate-800">
+                            <span><span className="font-mono font-semibold">{repair.repair_job_code}</span> · {repair.service_type}</span>
+                            <span className="text-slate-500">{repair.repair_status}</span>
+                          </button>
+                        ))}
+                        {(data?.diagnoses ?? []).slice(0, 4).map((diagnosis) => (
+                          <button key={diagnosis.id} type="button" onClick={() => { setActiveDiagnosis(diagnosis); setConfirmedFault(diagnosis.confirmed_fault ?? diagnosis.predicted_fault); }} className="block w-full rounded-lg border border-violet-200 p-2 text-left text-[11px] hover:border-violet-400 dark:border-violet-900">
+                            <span className="font-semibold text-violet-700 dark:text-violet-300">{diagnosis.confirmed_fault ?? diagnosis.predicted_fault}</span>
+                            <span className="block text-slate-500">{formatDate(diagnosis.created_at)} · {diagnosis.review_status}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </>
+                  )}
                 </div>
               </article>
 
@@ -1068,15 +1462,21 @@ export const SmartWorkshopView: React.FC<Props> = ({ onViewRepair }) => {
                     </div>
                     <div>
                       <p className="text-xs font-semibold text-slate-700 dark:text-slate-200">Related repair history</p>
-                      {componentRepairs.length === 0 && <p className="mt-2 text-xs text-slate-500">No matching repair job found in the ten most recent jobs.</p>}
-                      <div className="mt-2 space-y-2">
-                        {componentRepairs.map((repair) => (
-                          <button key={repair.id} type="button" onClick={() => onViewRepair(repair.id)} className="flex w-full items-center justify-between gap-2 rounded-lg border border-slate-200 p-2.5 text-left text-xs hover:border-blue-300 dark:border-slate-800">
-                            <span><span className="font-mono font-semibold text-slate-800 dark:text-slate-100">{repair.repair_job_code}</span><br /><span className="text-slate-500">{repair.service_type} · {repair.repair_status}</span></span>
-                            <ChevronRight className="h-4 w-4 text-slate-400" />
-                          </button>
-                        ))}
-                      </div>
+                      {selectionSource === 'catalogue' ? (
+                        <p className="mt-2 text-xs text-slate-500">Not applicable to catalogue exploration.</p>
+                      ) : (
+                        <>
+                          {componentRepairs.length === 0 && <p className="mt-2 text-xs text-slate-500">No matching repair job found in the ten most recent jobs.</p>}
+                          <div className="mt-2 space-y-2">
+                            {componentRepairs.map((repair) => (
+                              <button key={repair.id} type="button" onClick={() => onViewRepair(repair.id)} className="flex w-full items-center justify-between gap-2 rounded-lg border border-slate-200 p-2.5 text-left text-xs hover:border-blue-300 dark:border-slate-800">
+                                <span><span className="font-mono font-semibold text-slate-800 dark:text-slate-100">{repair.repair_job_code}</span><br /><span className="text-slate-500">{repair.service_type} · {repair.repair_status}</span></span>
+                                <ChevronRight className="h-4 w-4 text-slate-400" />
+                              </button>
+                            ))}
+                          </div>
+                        </>
+                      )}
                     </div>
                     <div>
                       <p className="text-xs font-semibold text-slate-700 dark:text-slate-200">AI predictions for this component</p>

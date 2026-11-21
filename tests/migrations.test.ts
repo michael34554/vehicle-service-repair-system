@@ -22,11 +22,13 @@ test('every SQL migration is registered in version order', () => {
     '005_smart_workshop_catalogue.sql',
     '006_customer_sessions.sql',
     '007_ai_intelligence.sql',
+    '008_vehicle_asset_catalogue.sql',
   ]);
   for (const migration of migrations) {
     assert.ok(db.includes(migration), `db.ts does not register ${migration}`);
   }
   assert.ok(db.indexOf('006_customer_sessions.sql') < db.indexOf('007_ai_intelligence.sql'));
+  assert.ok(db.indexOf('007_ai_intelligence.sql') < db.indexOf('008_vehicle_asset_catalogue.sql'));
 });
 
 test('intelligence migration creates the new lifecycle tables without destructive statements', () => {

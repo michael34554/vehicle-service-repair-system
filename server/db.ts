@@ -114,6 +114,7 @@ export async function initializeDatabase(): Promise<void> {
     { version: '005_smart_workshop_catalogue.sql', url: new URL('./migrations/005_smart_workshop_catalogue.sql', import.meta.url) },
     { version: '006_customer_sessions.sql', url: new URL('./migrations/006_customer_sessions.sql', import.meta.url) },
     { version: '007_ai_intelligence.sql', url: new URL('./migrations/007_ai_intelligence.sql', import.meta.url) },
+    { version: '008_vehicle_asset_catalogue.sql', url: new URL('./migrations/008_vehicle_asset_catalogue.sql', import.meta.url) },
   ];
   for (const migration of migrations) {
     const [appliedRows] = await pool.execute<RowDataPacket[]>(

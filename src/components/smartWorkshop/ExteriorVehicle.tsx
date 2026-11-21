@@ -2,16 +2,17 @@ import { useEffect, useMemo } from 'react';
 import { useGLTF, useTexture } from '@react-three/drei';
 import * as THREE from 'three';
 import type { ComponentKey, ComponentStatus } from '@/shared/smartWorkshop';
-import { DRACO_PATH, EXTERIOR_NODE_COMPONENTS, MODEL_PATH, STATUS_COLORS, type ViewStyle } from './viewerConfig';
+import { DRACO_PATH, STATUS_COLORS, type ViewStyle } from './viewerConfig';
 
 interface Props {
   statuses: Record<ComponentKey, ComponentStatus>;
   selected: ComponentKey | null;
   style: ViewStyle;
   onSelect: (key: ComponentKey) => void;
-  interactive?: boolean;
-  modelPath?: string;
+  modelPath: string;
   nodeMap?: Record<string, ComponentKey>;
+  shadowPath?: string | null;
+  interactive?: boolean;
   focusSelected?: boolean;
 }
 
@@ -31,17 +32,25 @@ function componentFromObject(object: THREE.Object3D | null, nodeMap: Record<stri
   return null;
 }
 
-/** Renders the registered GLB asset. Only exact named nodes in the asset's node map are selectable. */
+function GroundShadow({ path }: { path: string }) {
+  const shadow = useTexture(path);
+  return (
+    <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.002, 0]} renderOrder={2}>
+      <planeGeometry args={[2.62, 5.2]} />
+      <meshBasicMaterial map={shadow} transparent blending={THREE.MultiplyBlending} depthWrite={false} toneMapped={false} />
+    </mesh>
+  );
+}
+
+/** Renders the selected asset's GLB. Only nodes present in that asset's verified node map are selectable. */
 export function ExteriorVehicle({
-  statuses, selected, style, onSelect, interactive = true,
-  modelPath = MODEL_PATH, nodeMap, focusSelected = false,
+  statuses, selected, style, onSelect, modelPath, nodeMap, shadowPath = null,
+  interactive = true, focusSelected = false,
 }: Props) {
   const { scene } = useGLTF(modelPath, DRACO_PATH);
-  const shadow = useTexture('/assets/models/ferrari_ao.png');
-  const resolvedNodeMap = useMemo(() => ({ ...EXTERIOR_NODE_COMPONENTS, ...(nodeMap ?? {}) }), [nodeMap]);
+  const resolvedNodeMap = useMemo(() => ({ ...(nodeMap ?? {}) }), [nodeMap]);
   const model = useMemo(() => scene.clone(true), [scene]);
 
-  // Materials are cloned once per mount so the cached GLTF is never mutated.
   const materials = useMemo(() => {
     const map = new Map<THREE.Mesh, THREE.Material | THREE.Material[]>();
     model.traverse((object) => {
@@ -114,10 +123,7 @@ export function ExteriorVehicle({
         } : undefined}
         onPointerOut={interactive ? () => { document.body.style.cursor = ''; } : undefined}
       />
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.002, 0]} renderOrder={2}>
-        <planeGeometry args={[2.62, 5.2]} />
-        <meshBasicMaterial map={shadow} transparent blending={THREE.MultiplyBlending} depthWrite={false} toneMapped={false} />
-      </mesh>
+      {shadowPath && <GroundShadow path={shadowPath} />}
     </group>
   );
 }

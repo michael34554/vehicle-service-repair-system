@@ -6,7 +6,14 @@ import type { ComponentKey, ComponentStatus, WorkshopStatus } from '@/shared/sma
 import { ExteriorVehicle } from './ExteriorVehicle';
 import { MechanicalAssembly } from './MechanicalAssembly';
 import { ErrorBoundary } from './ErrorBoundary';
-import { CAMERA_PRESETS, STATUS_COLORS, type CameraPreset, type ViewerMode, type ViewStyle } from './viewerConfig';
+import {
+  CAMERA_PRESETS,
+  STATUS_COLORS,
+  type AssetAvailability,
+  type CameraPreset,
+  type ViewerMode,
+  type ViewStyle,
+} from './viewerConfig';
 
 interface Props {
   statuses: Record<ComponentKey, ComponentStatus>;
@@ -16,8 +23,12 @@ interface Props {
   preset: CameraPreset;
   resetToken: number;
   onSelect: (key: ComponentKey | null) => void;
-  modelPath?: string;
+  modelPath: string | null;
+  shadowPath?: string | null;
   nodeMap?: Record<string, ComponentKey>;
+  assetStatus?: AssetAvailability;
+  assetLabel?: string | null;
+  availableViewModes?: ViewerMode[];
   focusSelected?: boolean;
   selectedLabel?: string | null;
 }
@@ -40,12 +51,12 @@ function CameraController({ preset, resetToken, controls }: {
   return null;
 }
 
-function Scene({ props }: { props: Props }) {
+function Scene({ props, hasAsset }: { props: Props; hasAsset: boolean }) {
   const controls = useRef<OrbitControlsImpl>(null);
   const bodyStyle: ViewStyle = props.mode === 'interior' || props.mode === 'exploded' ? 'transparent' : props.style;
-  const showBody = props.mode !== 'mechanical';
+  const showBody = hasAsset && props.mode !== 'mechanical';
   const showAssembly = props.mode !== 'exterior' || props.style === 'exploded';
-  const assemblyStyle: ViewStyle = props.mode === 'exploded' || props.style === 'exploded' ? 'exploded' : 'normal';
+  const assemblyStyle: ViewStyle = props.mode === 'exploded' ? 'exploded' : 'normal';
   return (
     <>
       <color attach="background" args={['#0b1220']} />
@@ -59,9 +70,9 @@ function Scene({ props }: { props: Props }) {
       <ContactShadows position={[0, 0.012, 0]} opacity={0.55} scale={9} blur={2.6} far={3} resolution={512} />
 
       <Suspense fallback={null}>
-        {showBody && (
+        {showBody && props.modelPath && (
           <ExteriorVehicle
-            key={props.modelPath ?? 'default-model'}
+            key={props.modelPath}
             statuses={props.statuses}
             selected={props.selected}
             style={bodyStyle}
@@ -69,6 +80,7 @@ function Scene({ props }: { props: Props }) {
             interactive={props.mode === 'exterior'}
             modelPath={props.modelPath}
             nodeMap={props.nodeMap}
+            shadowPath={props.shadowPath}
             focusSelected={props.focusSelected}
           />
         )}
@@ -104,7 +116,22 @@ function LoadingOverlay() {
     <div className="pointer-events-none absolute inset-0 z-10 grid place-items-center bg-slate-950/45">
       <div className="flex items-center gap-3 rounded-lg border border-blue-400/30 bg-slate-900/90 px-4 py-3 text-sm text-blue-100 shadow-xl">
         <span className="h-4 w-4 animate-spin rounded-full border-2 border-blue-300 border-t-transparent" />
-        {errors.length ? 'A 3D asset could not be loaded.' : `Loading 3D vehicle… ${Math.round(progress)}%`}
+        {errors.length ? 'The selected 3D asset could not be loaded.' : `Loading 3D vehicle… ${Math.round(progress)}%`}
+      </div>
+    </div>
+  );
+}
+
+function AssetUnavailable({ label, reason }: { label: string; reason: string }) {
+  return (
+    <div className="grid h-full min-h-[430px] place-items-center px-6 text-center">
+      <div className="max-w-md">
+        <p className="text-sm font-semibold text-amber-300">3D asset unavailable</p>
+        <p className="mt-2 text-sm font-medium text-slate-100">{label}</p>
+        <p className="mt-2 text-xs leading-5 text-slate-400">{reason}</p>
+        <p className="mt-3 text-[11px] leading-5 text-slate-500">
+          No different vehicle is displayed in its place. Add or select a licensed GLB/GLTF asset through the catalogue to enable this view.
+        </p>
       </div>
     </div>
   );
@@ -115,22 +142,52 @@ export default function VehicleViewer(props: Props) {
   const selectedStatus: WorkshopStatus | null = props.selected
     ? props.statuses[props.selected]?.status ?? 'grey'
     : null;
+  const availableViewModes = props.availableViewModes ?? ['exterior', 'interior', 'mechanical', 'exploded'];
+  const hasAsset = Boolean(props.modelPath && props.assetStatus !== 'missing' && props.assetStatus !== 'disabled');
+  const label = props.assetLabel ?? 'Selected vehicle';
+  const interiorUnsupported = props.mode === 'interior' && !availableViewModes.includes('interior');
+
+  useEffect(() => {
+    setFailure('');
+  }, [props.modelPath, props.mode]);
 
   useEffect(() => {
     document.body.style.cursor = '';
     return () => { document.body.style.cursor = ''; };
   }, []);
 
+  if ((props.mode === 'exterior' || props.mode === 'interior') && !hasAsset) {
+    return (
+      <div className="relative h-full min-h-[430px] w-full overflow-hidden rounded-xl bg-slate-950" aria-label="3D vehicle asset unavailable">
+        <AssetUnavailable
+          label={label}
+          reason={props.assetStatus === 'representative_only'
+            ? 'This asset is a labelled representative illustration and is not an exact model for the selected vehicle.'
+            : 'No model file is registered and available for this vehicle.'}
+        />
+      </div>
+    );
+  }
+
+  if (interiorUnsupported) {
+    return (
+      <div className="relative h-full min-h-[430px] w-full overflow-hidden rounded-xl bg-slate-950" aria-label="Interior view unavailable">
+        <AssetUnavailable label={label} reason="This asset has no verified interior geometry. The other inspection views remain available." />
+      </div>
+    );
+  }
+
   return (
     <div className="relative h-full min-h-[430px] w-full overflow-hidden rounded-xl bg-slate-950" aria-label="Interactive 3D vehicle viewer">
       <ErrorBoundary
-        onError={() => setFailure('The 3D renderer or model could not be started on this device.')}
+        key={`${props.modelPath ?? 'no-asset'}-${props.mode}`}
+        onError={() => setFailure('The 3D renderer or selected model could not be started on this device.')}
         fallback={
           <div className="grid h-full min-h-[430px] place-items-center px-6 text-center">
             <div>
               <p className="text-sm font-semibold text-red-300">3D viewer unavailable</p>
               <p className="mt-2 max-w-sm text-xs leading-5 text-slate-400">
-                WebGL or the vehicle model could not be loaded. Inspection records and AI analysis remain available.
+                WebGL or the selected vehicle model could not be loaded. Inspection records and AI analysis remain available.
               </p>
             </div>
           </div>
@@ -143,10 +200,15 @@ export default function VehicleViewer(props: Props) {
           gl={{ antialias: true, powerPreference: 'high-performance' }}
           onPointerMissed={() => props.onSelect(null)}
         >
-          <Scene props={props} />
+          <Scene props={props} hasAsset={hasAsset} />
         </Canvas>
       </ErrorBoundary>
-      {!failure && <LoadingOverlay />}
+      {!failure && hasAsset && <LoadingOverlay />}
+      {!hasAsset && (
+        <div className="pointer-events-none absolute left-3 top-3 rounded-md border border-amber-500/40 bg-amber-950/70 px-3 py-2 text-[11px] text-amber-200" role="status">
+          Procedural inspection assembly · not vehicle-specific geometry
+        </div>
+      )}
       {props.selected && props.selectedLabel && selectedStatus && (
         <div className="pointer-events-none absolute left-3 top-3 rounded-md border border-slate-700/80 bg-slate-900/85 px-3 py-2 text-xs text-slate-100 shadow-lg" role="status">
           <span className="inline-flex items-center gap-2 font-semibold">

@@ -9,7 +9,7 @@ import { resolve } from 'node:path';
 import { createServer as createViteServer } from 'vite';
 import { db, initializeDatabase } from './db';
 import { registerMechanicRoutes } from './mechanics';
-import { registerSmartWorkshopCatalogueRoutes } from './smartWorkshopCatalogue';
+import { describeAsset, registerSmartWorkshopCatalogueRoutes } from './smartWorkshopCatalogue';
 import { seedSmartWorkshopCatalogue } from './smartWorkshopSeed';
 import {
   COMPONENT_KEYS,
@@ -21,6 +21,7 @@ import {
   type SmartWorkshopInspection,
   type SmartWorkshopPrediction,
 } from '../shared/smartWorkshop';
+import { resolveCatalogueModel } from '../shared/vehicleCatalogue';
 import {
   createClaims,
   createCsrfToken,
@@ -1920,7 +1921,7 @@ async function buildDiagnosisContext(
   const needsCatalogue = ['engine_type', 'fuel_type', 'transmission_type', 'drive_type']
     .some((field) => vehicle[field] === null || vehicle[field] === undefined || vehicle[field] === '');
   if (needsCatalogue) {
-    const catalogueModel = vehicle.catalogue_model_id
+    let catalogueModel = vehicle.catalogue_model_id
       ? await db.first('SELECT id FROM vehicle_models WHERE id = ?', String(vehicle.catalogue_model_id))
       : await db.first(`
           SELECT vm.id
@@ -1928,6 +1929,10 @@ async function buildDiagnosisContext(
           WHERE LOWER(m.name) = LOWER(?) AND LOWER(vm.name) = LOWER(?)
           LIMIT 1
         `, String(vehicle.make ?? ''), String(vehicle.model ?? ''));
+    if (!catalogueModel) {
+      const central = resolveCatalogueModel(String(vehicle.make ?? ''), String(vehicle.model ?? ''));
+      if (central) catalogueModel = await db.first('SELECT id FROM vehicle_models WHERE id = ?', central.id);
+    }
     if (catalogueModel) {
       catalogueSpecification = await db.first(`
         SELECT engine_type, engine_capacity_cc, fuel_type, transmission_type, drive_type, verification_status
@@ -2626,6 +2631,10 @@ async function resolveDiagnosisKnowledgeLinks(
       LIMIT 1
     `, vehicle.make, vehicle.model) as { id: string } | undefined;
     catalogueModelId = match?.id ?? null;
+    if (!catalogueModelId) {
+      const central = resolveCatalogueModel(vehicle.make, vehicle.model);
+      if (central) catalogueModelId = central.id;
+    }
   }
   const fault = await db.first(`
     SELECT id FROM vehicle_fault_records
@@ -2837,9 +2846,21 @@ app.get('/api/smart-workshop/vehicles/:vehicleId', requireAuth, asyncRoute(async
         LIMIT 1
       `, String(vehicle.make), String(vehicle.model));
     }
+    if (!catalogueModel) {
+      const central = resolveCatalogueModel(String(vehicle.make), String(vehicle.model));
+      if (central) {
+        catalogueModel = await db.first(`
+          SELECT vm.id, vm.name, vm.body_style, vm.asset_key, vm.asset_status, vm.specification_note,
+            m.name AS manufacturer_name
+          FROM vehicle_models vm JOIN vehicle_manufacturers m ON m.id = vm.manufacturer_id
+          WHERE vm.id = ?
+        `, central.id);
+      }
+    }
     const modelAsset = catalogueModel?.asset_key
       ? await db.first('SELECT * FROM vehicle_3d_assets WHERE asset_key = ?', String(catalogueModel.asset_key))
       : undefined;
+    const assetDescriptor = modelAsset ? describeAsset(modelAsset as Record<string, unknown>) : null;
     const catalogueSpecification = catalogueModel
       ? await db.first(`
           SELECT engine_type, engine_capacity_cc, fuel_type, transmission_type, drive_type,
@@ -2924,7 +2945,11 @@ app.get('/api/smart-workshop/vehicles/:vehicleId', requireAuth, asyncRoute(async
       repairs,
       active_assignment: activeAssignment ?? null,
       catalogue_model: catalogueModel ?? null,
-      model_asset: modelAsset ?? null,
+      model_asset: assetDescriptor
+        ? { ...assetDescriptor, node_map_json: JSON.stringify(assetDescriptor.node_map) }
+        : null,
+      asset_status: assetDescriptor?.availability_status ?? 'missing',
+      available_view_modes: assetDescriptor?.available_view_modes ?? [],
       specifications: {
         fields: specificationFields,
         missing: missingSpecifications,
@@ -4959,12 +4984,9 @@ app.patch('/api/visual/localizations/:id/review', requireAuth, asyncRoute(async 
 
 app.get('/api/smart-workshop/assets/:assetKey/validation', requireAuth, asyncRoute(async (request, response, next) => {
   try {
-    const asset = await db.first(`
-      SELECT asset_key, label, model_path, license, license_url, source,
-             is_generic, is_exact_match, node_map_json, is_active
-      FROM vehicle_3d_assets WHERE asset_key = ?
-    `, request.params.assetKey);
+    const asset = await db.first('SELECT * FROM vehicle_3d_assets WHERE asset_key = ?', request.params.assetKey);
     if (!asset) throw new HttpError(404, '3D asset not found.');
+    const descriptor = describeAsset(asset as Record<string, unknown>);
     const nodeMaps = await db.query(`
       SELECT id, component_key, node_name, geometry_source, confidence,
              verification_status, verified_by_name
@@ -4972,14 +4994,15 @@ app.get('/api/smart-workshop/assets/:assetKey/validation', requireAuth, asyncRou
     `, request.params.assetKey);
     const verified = nodeMaps.filter((row) => (row as { verification_status: string }).verification_status === 'verified').length;
     response.json({
-      asset,
+      asset: descriptor,
       node_maps: nodeMaps,
       integrity: {
-        has_license: Boolean(asset.license),
-        has_source: Boolean(asset.source),
-        exact_match_claim: asset.is_exact_match === 1,
+        has_license: Boolean(descriptor.license),
+        has_source: Boolean(descriptor.source),
+        exact_match_claim: descriptor.is_exact_match,
         verified_node_maps: verified,
         total_node_maps: nodeMaps.length,
+        file_exists: descriptor.file_exists,
       },
     });
   } catch (error) { next(error); }

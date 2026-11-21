@@ -1,12 +1,15 @@
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { Express, NextFunction, Request, RequestHandler, Response } from 'express';
 import type { db } from './db';
 import {
   COMPONENT_KEYS_SET,
   MECHANICAL_SYSTEMS,
   isComponentKey,
+  type ComponentKey,
   type SystemKey,
 } from '../shared/smartWorkshop';
 
@@ -123,6 +126,101 @@ const MISSING_FIELD_LABELS: Record<SpecField, string> = {
   drive_type: 'Drive type',
 };
 
+const PUBLIC_ROOT = fileURLToPath(new URL('../public', import.meta.url));
+const DEFAULT_VIEW_MODES = ['exterior', 'mechanical', 'exploded'];
+const VIEW_MODES = ['exterior', 'interior', 'mechanical', 'exploded'];
+
+export interface AssetDescriptor {
+  asset_key: string;
+  label: string;
+  model_path: string;
+  shadow_path: string | null;
+  license: string;
+  license_url: string | null;
+  source: string;
+  notes: string | null;
+  is_generic: boolean;
+  is_exact_match: boolean;
+  is_catalogue_selectable: boolean;
+  availability_status: 'available' | 'representative_only' | 'missing' | 'disabled';
+  file_exists: boolean;
+  available_view_modes: string[];
+  inspectable_components: ComponentKey[];
+  node_map: Record<string, ComponentKey>;
+  manufacturer_name: string | null;
+  model_name: string | null;
+  year_from: number | null;
+  year_to: number | null;
+  variant: string | null;
+}
+
+function assetFileExists(modelPath: unknown): boolean {
+  if (typeof modelPath !== 'string' || !modelPath.startsWith('/assets/')) return false;
+  const filePath = resolve(PUBLIC_ROOT, modelPath.replace(/^\/+/, ''));
+  return filePath.startsWith(`${PUBLIC_ROOT}${sep}`) && existsSync(filePath);
+}
+
+function parseNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? value
+    : typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))
+      ? Number(value)
+      : null;
+}
+
+function normalizeName(value: unknown): string {
+  return String(value ?? '').normalize('NFKD').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+export function describeAsset(row: Record<string, unknown>): AssetDescriptor {
+  const fileExists = assetFileExists(row.model_path);
+  const storedStatus = String(row.availability_status ?? '');
+  const isSelectable = Number(row.is_catalogue_selectable ?? 1) === 1;
+  const isGeneric = Number(row.is_generic ?? 0) === 1;
+  const isExact = Number(row.is_exact_match ?? 0) === 1;
+  const availabilityStatus: AssetDescriptor['availability_status'] = !isSelectable || storedStatus === 'disabled'
+    ? 'disabled'
+    : !fileExists || storedStatus === 'missing'
+      ? 'missing'
+      : isGeneric || !isExact
+        ? 'representative_only'
+        : 'available';
+  const storedModes = parseArray(row.available_view_modes_json)
+    .filter((mode): mode is string => typeof mode === 'string' && VIEW_MODES.includes(mode));
+  const availableViewModes = fileExists
+    ? (storedModes.length > 0 ? storedModes : DEFAULT_VIEW_MODES)
+    : [];
+  const inspectableComponents = parseArray(row.inspectable_components_json)
+    .filter((key): key is ComponentKey => isComponentKey(key));
+  const nodeMap: Record<string, ComponentKey> = {};
+  for (const [node, key] of Object.entries(parseObject(row.node_map_json))) {
+    if (isComponentKey(key)) nodeMap[node] = key;
+  }
+  return {
+    asset_key: String(row.asset_key ?? ''),
+    label: String(row.label ?? ''),
+    model_path: String(row.model_path ?? ''),
+    shadow_path: typeof row.shadow_path === 'string' && row.shadow_path ? row.shadow_path : null,
+    license: String(row.license ?? ''),
+    license_url: typeof row.license_url === 'string' && row.license_url ? row.license_url : null,
+    source: String(row.source ?? ''),
+    notes: typeof row.notes === 'string' && row.notes ? row.notes : null,
+    is_generic: isGeneric,
+    is_exact_match: isExact,
+    is_catalogue_selectable: isSelectable,
+    availability_status: availabilityStatus,
+    file_exists: fileExists,
+    available_view_modes: availableViewModes,
+    inspectable_components: inspectableComponents,
+    node_map: nodeMap,
+    manufacturer_name: typeof row.manufacturer_name === 'string' ? row.manufacturer_name : null,
+    model_name: typeof row.model_name === 'string' ? row.model_name : null,
+    year_from: parseNumber(row.year_from),
+    year_to: parseNumber(row.year_to),
+    variant: typeof row.variant === 'string' && row.variant ? row.variant : null,
+  };
+}
+
 export function registerSmartWorkshopCatalogueRoutes(deps: CatalogueDeps): void {
   const { app, db: database, HttpError, requireAuth, asyncRoute, requireObject, requiredText, requireVehicleAccess } = deps;
 
@@ -147,11 +245,105 @@ export function registerSmartWorkshopCatalogueRoutes(deps: CatalogueDeps): void 
   app.get('/api/smart-workshop/3d-assets', requireAuth, asyncRoute(async (_request, response, next) => {
     try {
       const records = await database.query(`
-        SELECT asset_key, label, model_path, license, license_url, source,
-          is_generic, is_exact_match, notes
-        FROM vehicle_3d_assets ORDER BY is_generic DESC, label ASC
-      `);
-      response.json({ records });
+        SELECT * FROM vehicle_3d_assets ORDER BY is_generic DESC, label ASC
+      `) as Record<string, unknown>[];
+      response.json({ records: records.map(describeAsset) });
+    } catch (error) { next(error); }
+  }));
+
+  app.get('/api/smart-workshop/catalogue/vehicles', requireAuth, asyncRoute(async (_request, response, next) => {
+    try {
+      const auth = authOf(response);
+      const rows = await database.query(`
+        SELECT m.id AS manufacturer_id, m.name AS manufacturer_name,
+          vm.id AS model_id, vm.name AS model_name, vm.body_style,
+          vm.year_from, vm.year_to, vm.asset_status, vm.specification_note,
+          vm.supported_years_json, vm.variants_json, vm.engines_json,
+          a.*
+        FROM vehicle_models vm
+        JOIN vehicle_manufacturers m ON m.id = vm.manufacturer_id
+        LEFT JOIN vehicle_3d_assets a ON a.asset_key = vm.asset_key
+        WHERE vm.is_active = 1 AND m.is_active = 1
+        ORDER BY m.name ASC, vm.name ASC
+      `) as Record<string, unknown>[];
+      const specificationRows = await database.query(`
+        SELECT model_id, engine_type FROM vehicle_specifications
+        WHERE verification_status != 'not_recorded' AND engine_type IS NOT NULL AND engine_type != ''
+        ORDER BY engine_type ASC
+      `) as Record<string, unknown>[];
+      const enginesByModel = new Map<string, string[]>();
+      for (const row of specificationRows) {
+        const modelId = String(row.model_id ?? '');
+        const engine = String(row.engine_type ?? '');
+        if (!modelId || !engine) continue;
+        const list = enginesByModel.get(modelId) ?? [];
+        if (!list.includes(engine)) list.push(engine);
+        enginesByModel.set(modelId, list);
+      }
+      const registeredYearRows = await database.query(`
+        SELECT make, model, model_year FROM vehicles
+        WHERE workshop_id = ? AND model_year IS NOT NULL
+      `, auth.workshop_id) as Record<string, unknown>[];
+      const yearsByModel = new Map<string, number[]>();
+      for (const row of registeredYearRows) {
+        const key = `${normalizeName(row.make)}|${normalizeName(row.model)}`;
+        const year = parseNumber(row.model_year);
+        if (year === null) continue;
+        const list = yearsByModel.get(key) ?? [];
+        if (!list.includes(year)) list.push(year);
+        yearsByModel.set(key, list);
+      }
+      const manufacturers = new Map<string, {
+        id: string;
+        name: string;
+        models: Record<string, unknown>[];
+      }>();
+      for (const row of rows) {
+        const manufacturerId = String(row.manufacturer_id ?? '');
+        const modelId = String(row.model_id ?? '');
+        if (!manufacturerId || !modelId) continue;
+        const manufacturer = manufacturers.get(manufacturerId) ?? {
+          id: manufacturerId,
+          name: String(row.manufacturer_name ?? manufacturerId),
+          models: [],
+        };
+        const modelName = String(row.model_name ?? '');
+        const years = new Set<number>();
+        for (const year of parseArray(row.supported_years_json)) {
+          const value = parseNumber(year);
+          if (value !== null) years.add(value);
+        }
+        const yearFrom = parseNumber(row.year_from);
+        const yearTo = parseNumber(row.year_to);
+        if (yearFrom !== null && yearTo !== null && yearTo >= yearFrom && yearTo - yearFrom <= 80) {
+          for (let year = yearFrom; year <= yearTo; year += 1) years.add(year);
+        }
+        for (const year of yearsByModel.get(`${normalizeName(manufacturer.name)}|${normalizeName(modelName)}`) ?? []) years.add(year);
+        const variants = parseArray(row.variants_json).filter((entry): entry is string => typeof entry === 'string');
+        const engines = new Set<string>(enginesByModel.get(modelId) ?? []);
+        for (const engine of parseArray(row.engines_json)) {
+          if (typeof engine === 'string' && engine) engines.add(engine);
+        }
+        const asset = describeAsset(row);
+        manufacturer.models.push({
+          id: modelId,
+          name: modelName,
+          manufacturer_id: manufacturerId,
+          manufacturer_name: manufacturer.name,
+          body_style: row.body_style ?? null,
+          asset_status: row.asset_status ?? null,
+          specification_note: row.specification_note ?? null,
+          years: [...years].sort((a, b) => a - b),
+          variants,
+          engines: [...engines].sort((a, b) => a.localeCompare(b)),
+          asset,
+        });
+        manufacturers.set(manufacturerId, manufacturer);
+      }
+      response.json({
+        manufacturers: [...manufacturers.values()].sort((a, b) => a.name.localeCompare(b.name)),
+        note: 'Model years, variants and engines are shown only when recorded in catalogue or registered-vehicle data. Missing values are not inferred.',
+      });
     } catch (error) { next(error); }
   }));
 
@@ -275,14 +467,15 @@ export function registerSmartWorkshopCatalogueRoutes(deps: CatalogueDeps): void 
       const asset = model.asset_key
         ? await database.first('SELECT * FROM vehicle_3d_assets WHERE asset_key = ?', String(model.asset_key))
         : undefined;
+      const descriptor = asset ? describeAsset(asset as Record<string, unknown>) : null;
       response.json({
         model_id: model.id,
-        asset_status: model.asset_status ?? 'representative',
-        asset: asset ?? null,
-        node_map: asset ? Object.entries(parseObject((asset as Record<string, unknown>).node_map_json)).map(([node, component_key]) => ({ node, component_key })) : [],
-        disclaimer: model.asset_status === 'exact'
+        asset_status: descriptor?.availability_status ?? 'missing',
+        asset: descriptor,
+        node_map: Object.entries(descriptor?.node_map ?? {}).map(([node, component_key]) => ({ node, component_key })),
+        disclaimer: descriptor?.availability_status === 'available'
           ? 'Model-specific asset. Verify the asset version against the vehicle before relying on component placement.'
-          : 'Representative 3D asset. It is not an exact replica of this manufacturer or model. Internal components are procedural inspection assemblies.',
+          : 'No verified model-specific 3D asset is available. Internal components are procedural inspection assemblies and are not an exact replica of this vehicle.',
       });
     } catch (error) { next(error); }
   }));
@@ -334,6 +527,33 @@ export function registerSmartWorkshopCatalogueRoutes(deps: CatalogueDeps): void 
     } catch (error) { next(error); }
   }));
 
+  interface ModelMetadata {
+    supportedYears: number[];
+    variants: string[];
+    engines: string[];
+  }
+
+  function yearArray(value: unknown, label: string): number[] {
+    if (value === undefined || value === null || value === '') return [];
+    if (!Array.isArray(value) || value.length > 100) throw new HttpError(400, `${label} must be an array of up to 100 years.`);
+    const years = value.map(Number);
+    if (years.some((year) => !Number.isInteger(year) || year < 1886 || year > 2100)) {
+      throw new HttpError(400, `${label} contains an invalid year.`);
+    }
+    return years;
+  }
+
+  function modelMetadata(body: Record<string, unknown>, existing?: Record<string, unknown>): ModelMetadata {
+    const existingYears = parseArray(existing?.supported_years_json).filter((year): year is number => typeof year === 'number');
+    const existingVariants = parseArray(existing?.variants_json).filter((value): value is string => typeof value === 'string');
+    const existingEngines = parseArray(existing?.engines_json).filter((value): value is string => typeof value === 'string');
+    return {
+      supportedYears: body.supported_years === undefined ? existingYears : yearArray(body.supported_years, 'Supported years'),
+      variants: body.variants === undefined ? existingVariants : catalogueArray(body.variants, 'Variants', 50),
+      engines: body.engines === undefined ? existingEngines : catalogueArray(body.engines, 'Engines', 50),
+    };
+  }
+
   app.post('/api/smart-workshop/manufacturers/:id/models', requireAuth, asyncRoute(async (request, response, next) => {
     try {
       requireAdmin(response);
@@ -354,14 +574,18 @@ export function registerSmartWorkshopCatalogueRoutes(deps: CatalogueDeps): void 
         || (yearFrom !== null && yearTo !== null && yearFrom > yearTo)) {
         throw new HttpError(400, 'Enter a valid model year range.');
       }
+      const metadata = modelMetadata(body);
       const now = new Date().toISOString();
       const exists = await database.first('SELECT id FROM vehicle_models WHERE id = ? OR (manufacturer_id = ? AND name = ?)', id, request.params.id, name);
       if (exists) throw new HttpError(409, 'That model already exists for this manufacturer.');
       await database.execute(`
         INSERT INTO vehicle_models
-          (id, manufacturer_id, name, body_style, year_from, year_to, image_path, asset_key, asset_status, specification_note, is_active, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 'representative', ?, 1, ?, ?)
-      `, id, request.params.id, name, bodyStyle, yearFrom, yearTo, assetKey,
+          (id, manufacturer_id, name, body_style, year_from, year_to, supported_years_json, variants_json, engines_json,
+           image_path, asset_key, asset_status, specification_note, is_active, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 'representative', ?, 1, ?, ?)
+      `, id, request.params.id, name, bodyStyle, yearFrom, yearTo,
+        JSON.stringify(metadata.supportedYears), JSON.stringify(metadata.variants), JSON.stringify(metadata.engines),
+        assetKey,
         'No verified technical specifications are recorded. Confirm details against the vehicle or manufacturer service information.', now, now);
       for (const system of MECHANICAL_SYSTEMS) {
         await database.execute('INSERT IGNORE INTO vehicle_model_systems (model_id, system_key) VALUES (?, ?)', id, system.key);
@@ -375,10 +599,14 @@ export function registerSmartWorkshopCatalogueRoutes(deps: CatalogueDeps): void 
       requireAdmin(response);
       await modelOr404(request.params.id);
       const body = requireObject(request.body);
-      const allowed = ['asset_key', 'asset_status', 'image_path', 'specification_note', 'is_active'];
+      const allowed = [
+        'asset_key', 'asset_status', 'image_path', 'specification_note', 'is_active',
+        'year_from', 'year_to', 'supported_years', 'variants', 'engines',
+      ];
       if (Object.keys(body).some((field) => !allowed.includes(field))) throw new HttpError(400, 'Unsupported model update field.');
+      const existingModel = await database.first('SELECT * FROM vehicle_models WHERE id = ?', request.params.id) as Record<string, unknown> | undefined;
       const sets: string[] = [];
-      const values: (string | number)[] = [];
+      const values: (string | number | null)[] = [];
       if (body.asset_key !== undefined) {
         const assetKey = requiredText(body.asset_key, '3D asset', 2, 191);
         if (!await database.first('SELECT asset_key FROM vehicle_3d_assets WHERE asset_key = ?', assetKey)) throw new HttpError(400, 'Select a registered 3D asset.');
@@ -386,7 +614,7 @@ export function registerSmartWorkshopCatalogueRoutes(deps: CatalogueDeps): void 
       }
       if (body.asset_status !== undefined) {
         const status = requiredText(body.asset_status, 'Asset status', 1, 32);
-        if (!['representative', 'exact'].includes(status)) throw new HttpError(400, 'Asset status must be representative or exact.');
+        if (!['representative', 'exact', 'missing'].includes(status)) throw new HttpError(400, 'Asset status must be representative, exact or missing.');
         sets.push('asset_status = ?'); values.push(status);
       }
       if (body.image_path !== undefined) {
@@ -401,6 +629,28 @@ export function registerSmartWorkshopCatalogueRoutes(deps: CatalogueDeps): void 
         if (typeof body.is_active !== 'boolean') throw new HttpError(400, 'is_active must be true or false.');
         sets.push('is_active = ?'); values.push(body.is_active ? 1 : 0);
       }
+      const yearFrom = body.year_from === undefined ? null : Number(body.year_from);
+      const yearTo = body.year_to === undefined ? null : Number(body.year_to);
+      if (body.year_from !== undefined && (!Number.isInteger(yearFrom) || yearFrom < 1886 || yearFrom > 2100)) {
+        throw new HttpError(400, 'Enter a valid starting year.');
+      }
+      if (body.year_to !== undefined && (!Number.isInteger(yearTo) || yearTo < 1886 || yearTo > 2100)) {
+        throw new HttpError(400, 'Enter a valid ending year.');
+      }
+      const finalYearFrom = body.year_from === undefined ? parseNumber(existingModel?.year_from) : yearFrom;
+      const finalYearTo = body.year_to === undefined ? parseNumber(existingModel?.year_to) : yearTo;
+      if (finalYearFrom !== null && finalYearTo !== null && finalYearFrom > finalYearTo) {
+        throw new HttpError(400, 'The starting year cannot be later than the ending year.');
+      }
+      if (body.year_from !== undefined || body.year_to !== undefined) {
+        if (body.year_from !== undefined) { sets.push('year_from = ?'); values.push(yearFrom); }
+        if (body.year_to !== undefined) { sets.push('year_to = ?'); values.push(yearTo); }
+      }
+      if (body.supported_years !== undefined || body.variants !== undefined || body.engines !== undefined) {
+        const metadata = modelMetadata(body, existingModel);
+        sets.push('supported_years_json = ?', 'variants_json = ?', 'engines_json = ?');
+        values.push(JSON.stringify(metadata.supportedYears), JSON.stringify(metadata.variants), JSON.stringify(metadata.engines));
+      }
       if (sets.length === 0) throw new HttpError(400, 'Provide at least one field to update.');
       sets.push('updated_at = ?'); values.push(new Date().toISOString());
       await database.execute(`UPDATE vehicle_models SET ${sets.join(', ')} WHERE id = ?`, ...values, request.params.id);
@@ -408,39 +658,263 @@ export function registerSmartWorkshopCatalogueRoutes(deps: CatalogueDeps): void 
     } catch (error) { next(error); }
   }));
 
+  // Links an existing registered vehicle to catalogue metadata. This is not a
+  // second vehicle registration: it only records the workshop's verified link
+  // and any specifications actually recorded for that vehicle.
+  app.patch('/api/smart-workshop/vehicles/:vehicleId/catalogue-link', requireAuth, asyncRoute(async (request, response, next) => {
+    try {
+      const auth = authOf(response);
+      if (!['owner', 'manager', 'advisor'].includes(auth.role)) {
+        throw new HttpError(403, 'Only workshop staff can link a vehicle to the catalogue.');
+      }
+      await requireVehicleAccess(request.params.vehicleId, auth);
+      const body = requireObject(request.body);
+      const allowed = ['catalogue_model_id', ...SPEC_FIELDS];
+      if (Object.keys(body).some((field) => !allowed.includes(field))) throw new HttpError(400, 'Unsupported catalogue link field.');
+      const sets: string[] = [];
+      const values: (string | number | null)[] = [];
+      if (body.catalogue_model_id !== undefined) {
+        const modelId = body.catalogue_model_id === null || body.catalogue_model_id === ''
+          ? null : requiredText(body.catalogue_model_id, 'Catalogue model', 2, 191);
+        if (modelId && !await database.first('SELECT id FROM vehicle_models WHERE id = ? AND is_active = 1', modelId)) {
+          throw new HttpError(400, 'Select an active catalogue model.');
+        }
+        sets.push('catalogue_model_id = ?'); values.push(modelId);
+      }
+      for (const field of SPEC_FIELDS) {
+        if (body[field] === undefined) continue;
+        const raw = body[field];
+        if (raw === null || raw === '') {
+          sets.push(`${field} = ?`); values.push(null);
+          continue;
+        }
+        if (field === 'engine_capacity_cc') {
+          const capacity = Number(raw);
+          if (!Number.isInteger(capacity) || capacity < 0 || capacity > 20000) {
+            throw new HttpError(400, 'Engine capacity must be a valid number of cubic centimetres.');
+          }
+          sets.push(`${field} = ?`); values.push(capacity);
+        } else {
+          sets.push(`${field} = ?`); values.push(requiredText(raw, MISSING_FIELD_LABELS[field], 1, field === 'engine_type' ? 120 : 80));
+        }
+      }
+      if (sets.length === 0) throw new HttpError(400, 'Provide at least one field to update.');
+      sets.push('updated_at = ?'); values.push(new Date().toISOString());
+      await database.execute(`UPDATE vehicles SET ${sets.join(', ')} WHERE id = ? AND workshop_id = ?`,
+        ...values, request.params.vehicleId, auth.workshop_id);
+      const record = await database.first(`
+        SELECT id, catalogue_model_id, engine_type, engine_capacity_cc, fuel_type, transmission_type, drive_type
+        FROM vehicles WHERE id = ? AND workshop_id = ?
+      `, request.params.vehicleId, auth.workshop_id);
+      response.json({ record });
+    } catch (error) { next(error); }
+  }));
+
+  const catalogueArray = (value: unknown, label: string, maxItems: number): string[] => {
+    try {
+      return stringArray(value, label, maxItems);
+    } catch (error) {
+      throw new HttpError(400, error instanceof Error ? error.message : `${label} is invalid.`);
+    }
+  };
+
+  interface AssetInput {
+    assetKey: string;
+    label: string;
+    modelPath: string;
+    license: string;
+    licenseUrl: string | null;
+    source: string;
+    isGeneric: boolean;
+    isExact: boolean;
+    nodeMap: Record<string, string>;
+    notes: string | null;
+    manufacturerName: string | null;
+    modelName: string | null;
+    yearFrom: number | null;
+    yearTo: number | null;
+    variant: string | null;
+    shadowPath: string | null;
+    viewModes: string[];
+    inspectable: ComponentKey[];
+    storedStatus: string;
+    isSelectable: boolean;
+  }
+
+  function assetInput(body: Record<string, unknown>, existing?: Record<string, unknown>): AssetInput {
+    const assetKey = body.asset_key === undefined
+      ? String(existing?.asset_key ?? '')
+      : requiredText(body.asset_key, 'Asset key', 2, 191);
+    if (!assetKey) throw new HttpError(400, 'Asset key is required.');
+    const label = body.label === undefined
+      ? String(existing?.label ?? '')
+      : requiredText(body.label, 'Asset label', 2, 255);
+    if (!label) throw new HttpError(400, 'Asset label is required.');
+    const modelPath = body.model_path === undefined
+      ? String(existing?.model_path ?? '')
+      : requiredText(body.model_path, 'Model path', 2, 500);
+    if (!modelPath.startsWith('/assets/') || !/\.(glb|gltf)$/i.test(modelPath)) {
+      throw new HttpError(400, 'Model path must point to a local /assets/ GLB or GLTF file.');
+    }
+    const license = body.license === undefined
+      ? String(existing?.license ?? '')
+      : requiredText(body.license, 'License', 2, 120);
+    if (!license) throw new HttpError(400, 'License is required.');
+    const source = body.source === undefined
+      ? String(existing?.source ?? '')
+      : requiredText(body.source, 'Source and attribution', 4, 500);
+    if (!source) throw new HttpError(400, 'Source and attribution are required.');
+    const licenseUrl = body.license_url === undefined
+      ? (typeof existing?.license_url === 'string' ? existing.license_url : null)
+      : (body.license_url === null || body.license_url === '' ? null : requiredText(body.license_url, 'License URL', 2, 500));
+    const isGeneric = body.is_generic === undefined
+      ? Number(existing?.is_generic ?? 0) === 1
+      : body.is_generic === true;
+    const isExact = body.is_exact_match === undefined
+      ? Number(existing?.is_exact_match ?? 0) === 1
+      : body.is_exact_match === true;
+    if (isExact && isGeneric) throw new HttpError(400, 'An exact model match cannot also be marked generic.');
+
+    let nodeMapSource: Record<string, unknown> = parseObject(existing?.node_map_json);
+    if (body.node_map !== undefined && body.node_map !== null) nodeMapSource = requireObject(body.node_map);
+    const nodeMap: Record<string, string> = {};
+    for (const [node, key] of Object.entries(nodeMapSource)) {
+      if (!isComponentKey(key)) throw new HttpError(400, `Unsupported component key for node ${node}.`);
+      nodeMap[node.slice(0, 191)] = key;
+    }
+
+    let viewModeSource: string[];
+    if (body.available_view_modes === undefined) {
+      viewModeSource = parseArray(existing?.available_view_modes_json)
+        .filter((mode): mode is string => typeof mode === 'string');
+    } else {
+      viewModeSource = catalogueArray(body.available_view_modes, 'Available view modes', VIEW_MODES.length);
+    }
+    if (viewModeSource.some((mode) => !VIEW_MODES.includes(mode))) {
+      throw new HttpError(400, 'Available view modes contain an unsupported mode.');
+    }
+    const viewModes = viewModeSource;
+
+    let inspectableSource: string[];
+    if (body.inspectable_components === undefined) {
+      inspectableSource = parseArray(existing?.inspectable_components_json)
+        .filter((key): key is string => typeof key === 'string');
+    } else {
+      inspectableSource = catalogueArray(body.inspectable_components, 'Inspectable components', COMPONENT_KEYS_SET.size);
+    }
+    if (inspectableSource.some((key) => !isComponentKey(key))) {
+      throw new HttpError(400, 'Inspectable components contain an unsupported component key.');
+    }
+    const inspectable = inspectableSource as ComponentKey[];
+
+    const statusCandidate = body.availability_status === undefined
+      ? existing?.availability_status
+      : body.availability_status;
+    let storedStatus = statusCandidate === undefined || statusCandidate === null || statusCandidate === ''
+      ? '' : requiredText(statusCandidate, 'Availability status', 1, 32);
+    if (storedStatus && !['available', 'representative_only', 'missing', 'disabled'].includes(storedStatus)) {
+      throw new HttpError(400, 'Availability status must be available, representative_only, missing or disabled.');
+    }
+    if (!storedStatus) storedStatus = assetFileExists(modelPath) ? (isExact ? 'available' : 'representative_only') : 'missing';
+
+    const yearFrom = body.year_from === undefined ? parseNumber(existing?.year_from) : parseNumber(body.year_from);
+    const yearTo = body.year_to === undefined ? parseNumber(existing?.year_to) : parseNumber(body.year_to);
+    if ((yearFrom !== null && (!Number.isInteger(yearFrom) || yearFrom < 1886 || yearFrom > 2100))
+      || (yearTo !== null && (!Number.isInteger(yearTo) || yearTo < 1886 || yearTo > 2100))
+      || (yearFrom !== null && yearTo !== null && yearFrom > yearTo)) {
+      throw new HttpError(400, 'Enter a valid supported year range.');
+    }
+
+    const optionalText = (field: string, existingField: string | undefined, label: string, min: number, max: number) => {
+      if (body[field] === undefined) return typeof existingField === 'string' && existingField ? existingField : null;
+      if (body[field] === null || body[field] === '') return null;
+      return requiredText(body[field], label, min, max);
+    };
+    const manufacturerName = optionalText('manufacturer_name', typeof existing?.manufacturer_name === 'string' ? existing.manufacturer_name : undefined, 'Manufacturer name', 2, 120);
+    const modelName = optionalText('model_name', typeof existing?.model_name === 'string' ? existing.model_name : undefined, 'Model name', 1, 120);
+    const variant = optionalText('variant', typeof existing?.variant === 'string' ? existing.variant : undefined, 'Variant', 1, 120);
+    const shadowPath = optionalText('shadow_path', typeof existing?.shadow_path === 'string' ? existing.shadow_path : undefined, 'Shadow texture path', 2, 500);
+    if (shadowPath && !shadowPath.startsWith('/assets/')) throw new HttpError(400, 'Shadow texture must be a local /assets/ path.');
+    const isSelectable = body.is_catalogue_selectable === undefined
+      ? Number(existing?.is_catalogue_selectable ?? 1) === 1
+      : body.is_catalogue_selectable === true;
+    const notes = body.notes === undefined
+      ? (typeof existing?.notes === 'string' ? existing.notes : null)
+      : (typeof body.notes === 'string' ? body.notes.slice(0, 4000) : null);
+
+    return {
+      assetKey, label, modelPath, license, licenseUrl, source, isGeneric, isExact, nodeMap, notes,
+      manufacturerName, modelName, yearFrom, yearTo, variant, shadowPath, viewModes, inspectable,
+      storedStatus, isSelectable,
+    };
+  }
+
+  const insertOrUpdateAsset = (input: AssetInput, existingKey?: string): Promise<unknown> => {
+    const values = [
+      input.assetKey, input.label, input.modelPath, input.license, input.licenseUrl, input.source,
+      input.isGeneric ? 1 : 0, input.isExact ? 1 : 0, JSON.stringify(input.nodeMap), input.notes,
+      input.manufacturerName, input.modelName, input.yearFrom, input.yearTo, input.variant,
+      input.shadowPath, JSON.stringify(input.viewModes), JSON.stringify(input.inspectable),
+      input.storedStatus, input.isSelectable ? 1 : 0, new Date().toISOString(),
+    ];
+    if (existingKey) {
+      return database.execute(`
+        UPDATE vehicle_3d_assets SET
+          asset_key = ?, label = ?, model_path = ?, license = ?, license_url = ?, source = ?,
+          is_generic = ?, is_exact_match = ?, node_map_json = ?, notes = ?, manufacturer_name = ?,
+          model_name = ?, year_from = ?, year_to = ?, variant = ?, shadow_path = ?,
+          available_view_modes_json = ?, inspectable_components_json = ?, availability_status = ?,
+          is_catalogue_selectable = ?, updated_at = ?
+        WHERE asset_key = ?
+      `, ...values, existingKey);
+    }
+    const timestamp = values[values.length - 1];
+    return database.execute(`
+      INSERT INTO vehicle_3d_assets
+        (asset_key, label, model_path, license, license_url, source, is_generic, is_exact_match,
+         node_map_json, notes, manufacturer_name, model_name, year_from, year_to, variant,
+         shadow_path, available_view_modes_json, inspectable_components_json, availability_status,
+         is_catalogue_selectable, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, ...values.slice(0, -1), timestamp, timestamp);
+  };
+
+  async function assetRecord(assetKey: string): Promise<Record<string, unknown>> {
+    return await database.first('SELECT * FROM vehicle_3d_assets WHERE asset_key = ?', assetKey) as Record<string, unknown>;
+  }
+
   app.post('/api/smart-workshop/3d-assets', requireAuth, asyncRoute(async (request, response, next) => {
     try {
       requireAdmin(response);
-      const body = requireObject(request.body);
-      const assetKey = requiredText(body.asset_key, 'Asset key', 2, 191);
-      const label = requiredText(body.label, 'Asset label', 2, 255);
-      const modelPath = requiredText(body.model_path, 'Model path', 2, 500);
-      if (!modelPath.startsWith('/assets/')) throw new HttpError(400, 'Model path must point to a local /assets/ GLB file.');
-      const license = requiredText(body.license, 'License', 2, 120);
-      const source = requiredText(body.source, 'Source and attribution', 4, 500);
-      const licenseUrl = typeof body.license_url === 'string' ? body.license_url.slice(0, 500) : null;
-      const isGeneric = body.is_generic === undefined ? true : body.is_generic === true;
-      const isExact = body.is_exact_match === true;
-      if (isExact && isGeneric) throw new HttpError(400, 'An exact model match cannot also be marked generic.');
-      let nodeMap: Record<string, string> = {};
-      if (body.node_map !== undefined && body.node_map !== null) {
-        const candidate = requireObject(body.node_map);
-        nodeMap = {};
-        for (const [node, key] of Object.entries(candidate)) {
-          if (!isComponentKey(key)) throw new HttpError(400, `Unsupported component key for node ${node}.`);
-          nodeMap[node.slice(0, 191)] = key;
-        }
+      const input = assetInput(requireObject(request.body));
+      if (await database.first('SELECT asset_key FROM vehicle_3d_assets WHERE asset_key = ?', input.assetKey)) {
+        throw new HttpError(409, 'That asset key already exists.');
       }
-      const notes = typeof body.notes === 'string' ? body.notes.slice(0, 4000) : null;
-      const now = new Date().toISOString();
-      if (await database.first('SELECT asset_key FROM vehicle_3d_assets WHERE asset_key = ?', assetKey)) throw new HttpError(409, 'That asset key already exists.');
-      await database.execute(`
-        INSERT INTO vehicle_3d_assets
-          (asset_key, label, model_path, license, license_url, source, is_generic, is_exact_match, node_map_json, notes, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, assetKey, label, modelPath, license, licenseUrl, source, isGeneric ? 1 : 0, isExact ? 1 : 0,
-        JSON.stringify(nodeMap), notes, now, now);
-      response.status(201).json({ record: { asset_key: assetKey, label, model_path: modelPath, license, is_generic: isGeneric, is_exact_match: isExact } });
+      await insertOrUpdateAsset(input);
+      const derivedStatus = input.storedStatus === 'available'
+        ? 'exact'
+        : input.storedStatus === 'representative_only' ? 'representative' : 'missing';
+      await database.execute('UPDATE vehicle_models SET asset_status = ? WHERE asset_key = ?', derivedStatus, input.assetKey);
+      response.status(201).json({ record: describeAsset(await assetRecord(input.assetKey)) });
+    } catch (error) { next(error); }
+  }));
+
+  app.patch('/api/smart-workshop/3d-assets/:assetKey', requireAuth, asyncRoute(async (request, response, next) => {
+    try {
+      requireAdmin(response);
+      const existing = await assetRecord(request.params.assetKey);
+      if (!existing) throw new HttpError(404, '3D asset not found.');
+      const body = requireObject(request.body);
+      if (body.asset_key !== undefined && requiredText(body.asset_key, 'Asset key', 2, 191) !== request.params.assetKey) {
+        throw new HttpError(400, 'An asset key cannot be changed. Register a new asset instead.');
+      }
+      const input = assetInput(body, existing);
+      await insertOrUpdateAsset(input, request.params.assetKey);
+      const derivedStatus = input.storedStatus === 'available'
+        ? 'exact'
+        : input.storedStatus === 'representative_only' ? 'representative' : 'missing';
+      await database.execute('UPDATE vehicle_models SET asset_status = ? WHERE asset_key = ?', derivedStatus, input.assetKey);
+      response.json({ record: describeAsset(await assetRecord(input.assetKey)) });
     } catch (error) { next(error); }
   }));
 

@@ -1,5 +1,14 @@
+import { existsSync } from 'node:fs';
+import { resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { db } from './db';
 import { MECHANICAL_SYSTEMS, SMART_WORKSHOP_CONFIG, componentSystemKey, type ComponentKey } from '../shared/smartWorkshop';
+import {
+  GENERIC_DEMO_ASSET_KEY,
+  GENERIC_DEMO_ASSET_PATH,
+  resolveCatalogueModel,
+  type CatalogueModel,
+} from '../shared/vehicleCatalogue';
 
 /**
  * Idempotent reference-data seed for the Smart Workshop catalogue.
@@ -17,12 +26,29 @@ interface ManufacturerSeed {
   models: { id: string; name: string; body_style: string }[];
 }
 
+const PUBLIC_ROOT = fileURLToPath(new URL('../public', import.meta.url));
+
+function assetFileExists(modelPath: string): boolean {
+  if (!modelPath.startsWith('/assets/')) return false;
+  const filePath = resolve(PUBLIC_ROOT, modelPath.replace(/^\/+/, ''));
+  return filePath.startsWith(`${PUBLIC_ROOT}${sep}`) && existsSync(filePath);
+}
+
+function assetKeyFor(manufacturer: string, modelName: string, fallbackId: string): { assetKey: string; modelPath: string } {
+  const central: CatalogueModel | undefined = resolveCatalogueModel(manufacturer, modelName);
+  if (central) return { assetKey: central.assetKey, modelPath: central.assetPath };
+  const slug = modelName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  return { assetKey: `legacy-${fallbackId}`, modelPath: `/assets/models/${manufacturer}/${slug}.glb` };
+}
+
 const MANUFACTURERS: ManufacturerSeed[] = [
   { id: 'toyota', name: 'Toyota', country: 'Japan', models: [
     { id: 'toyota-corolla', name: 'Corolla', body_style: 'Sedan' },
     { id: 'toyota-camry', name: 'Camry', body_style: 'Sedan' },
     { id: 'toyota-hilux', name: 'Hilux', body_style: 'Pickup' },
     { id: 'toyota-rav4', name: 'RAV4', body_style: 'SUV' },
+    { id: 'toyota-land-cruiser', name: 'Land Cruiser', body_style: 'SUV' },
+    { id: 'toyota-vitz', name: 'Vitz', body_style: 'Hatchback' },
     { id: 'toyota-yaris', name: 'Yaris', body_style: 'Hatchback' },
   ] },
   { id: 'nissan', name: 'Nissan', country: 'Japan', models: [
@@ -31,6 +57,8 @@ const MANUFACTURERS: ManufacturerSeed[] = [
     { id: 'nissan-note', name: 'Note', body_style: 'Hatchback' },
     { id: 'nissan-navara', name: 'Navara', body_style: 'Pickup' },
     { id: 'nissan-x-trail', name: 'X-Trail', body_style: 'SUV' },
+    { id: 'nissan-patrol', name: 'Patrol', body_style: 'SUV' },
+    { id: 'nissan-march', name: 'March', body_style: 'Hatchback' },
   ] },
   { id: 'volkswagen', name: 'Volkswagen', country: 'Germany', models: [
     { id: 'vw-golf', name: 'Golf', body_style: 'Hatchback' },
@@ -41,6 +69,9 @@ const MANUFACTURERS: ManufacturerSeed[] = [
   { id: 'mercedes-benz', name: 'Mercedes-Benz', country: 'Germany', models: [
     { id: 'mercedes-c-class', name: 'C-Class', body_style: 'Sedan' },
     { id: 'mercedes-e-class', name: 'E-Class', body_style: 'Sedan' },
+    { id: 'mercedes-s-class', name: 'S-Class', body_style: 'Sedan' },
+    { id: 'mercedes-gle', name: 'GLE', body_style: 'SUV' },
+    { id: 'mercedes-sprinter', name: 'Sprinter', body_style: 'Van' },
     { id: 'mercedes-glc', name: 'GLC', body_style: 'SUV' },
     { id: 'mercedes-a-class', name: 'A-Class', body_style: 'Hatchback' },
   ] },
@@ -48,6 +79,7 @@ const MANUFACTURERS: ManufacturerSeed[] = [
     { id: 'ford-ranger', name: 'Ranger', body_style: 'Pickup' },
     { id: 'ford-focus', name: 'Focus', body_style: 'Hatchback' },
     { id: 'ford-everest', name: 'Everest', body_style: 'SUV' },
+    { id: 'ford-mustang', name: 'Mustang', body_style: 'Coupe' },
     { id: 'ford-fiesta', name: 'Fiesta', body_style: 'Hatchback' },
   ] },
   { id: 'honda', name: 'Honda', country: 'Japan', models: [
@@ -79,6 +111,11 @@ const MANUFACTURERS: ManufacturerSeed[] = [
     { id: 'mitsubishi-outlander', name: 'Outlander', body_style: 'SUV' },
     { id: 'mitsubishi-pajero', name: 'Pajero', body_style: 'SUV' },
     { id: 'mitsubishi-triton', name: 'Triton', body_style: 'Pickup' },
+  ] },
+  { id: 'suzuki', name: 'Suzuki', country: 'Japan', models: [
+    { id: 'suzuki-swift', name: 'Swift', body_style: 'Hatchback' },
+    { id: 'suzuki-vitara', name: 'Vitara', body_style: 'SUV' },
+    { id: 'suzuki-alto', name: 'Alto', body_style: 'Hatchback' },
   ] },
 ];
 
@@ -387,24 +424,71 @@ export interface CatalogueSeedResult {
 /** Safe to call on every server start: all inserts use INSERT IGNORE. */
 export async function seedSmartWorkshopCatalogue(database: typeof db): Promise<CatalogueSeedResult> {
   const now = new Date().toISOString();
-  const genericAssetKey = 'generic-licensed-vehicle';
+  const genericAssetKey = GENERIC_DEMO_ASSET_KEY;
   const nodeMap = Object.fromEntries(
     SMART_WORKSHOP_CONFIG.components.flatMap((component) => component.exteriorNodes.map((node) => [node, component.key]))
   );
 
   await database.execute(`
     INSERT IGNORE INTO vehicle_3d_assets
-      (asset_key, label, model_path, license, license_url, source, is_generic, is_exact_match, node_map_json, notes, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (asset_key, label, model_path, license, license_url, source, is_generic, is_exact_match,
+       node_map_json, notes, availability_status, is_catalogue_selectable,
+       available_view_modes_json, inspectable_components_json, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `, genericAssetKey,
     'Generic licensed illustration (Ferrari 458 Italia)',
-    '/assets/models/ferrari.glb',
+    GENERIC_DEMO_ASSET_PATH,
     'CC BY 4.0',
     'https://creativecommons.org/licenses/by/4.0/',
     'Ferrari 458 Italia model by vicent091036, distributed as the three.js example ferrari.glb',
     1, 0, JSON.stringify(nodeMap),
     'Representative vehicle body only. It is NOT an exact model of any manufacturer in this catalogue. Interior and mechanical groups are procedural assemblies.',
-    now, now);
+    assetFileExists(GENERIC_DEMO_ASSET_PATH) ? 'representative_only' : 'missing', 0,
+    JSON.stringify(['exterior']), JSON.stringify(Object.values(nodeMap)), now, now);
+  await database.execute(`
+    UPDATE vehicle_3d_assets SET
+      availability_status = ?, is_catalogue_selectable = 0,
+      available_view_modes_json = ?, inspectable_components_json = ?,
+      manufacturer_name = NULL, model_name = NULL, year_from = NULL, year_to = NULL,
+      variant = NULL, shadow_path = NULL, updated_at = ?
+    WHERE asset_key = ?
+  `, assetFileExists(GENERIC_DEMO_ASSET_PATH) ? 'representative_only' : 'missing',
+    JSON.stringify(['exterior']), JSON.stringify(Object.values(nodeMap)), now, genericAssetKey);
+
+  // Register one explicit asset slot per catalogue model. A missing GLB is
+  // recorded as missing; it is never replaced silently by the Ferrari asset.
+  for (const manufacturer of MANUFACTURERS) {
+    for (const model of manufacturer.models) {
+      const { assetKey, modelPath } = assetKeyFor(manufacturer.name, model.name, model.id);
+      const available = assetFileExists(modelPath);
+      await database.execute(`
+        INSERT IGNORE INTO vehicle_3d_assets
+          (asset_key, label, model_path, license, license_url, source, is_generic, is_exact_match,
+           node_map_json, notes, manufacturer_name, model_name, available_view_modes_json,
+           inspectable_components_json, availability_status, is_catalogue_selectable, created_at, updated_at)
+        VALUES (?, ?, ?, ?, NULL, ?, 0, ?, '{}', ?, ?, ?, ?, ?, ?, 1, ?, ?)
+      `, assetKey,
+        `${manufacturer.name} ${model.name}`,
+        modelPath,
+        'Asset licence must be supplied before this model is enabled',
+        `Local 3D asset slot for ${manufacturer.name} ${model.name}. Add the licensed GLB at this path and register verified nodes before enabling exact inspection.`,
+        available ? 1 : 0,
+        available
+          ? 'Licensed model-specific GLB detected. Verify licence and component nodes before relying on it.'
+          : `No 3D model file is present at ${modelPath}. Add the licensed GLB/GLTF asset to enable this model.`,
+        manufacturer.name, model.name,
+        JSON.stringify(available ? ['exterior', 'mechanical', 'exploded'] : []),
+        '[]',
+        available ? 'available' : 'missing', now, now);
+      await database.execute(`
+        UPDATE vehicle_3d_assets SET
+          model_path = ?, is_exact_match = ?, manufacturer_name = ?, model_name = ?,
+          availability_status = ?, updated_at = ?
+        WHERE asset_key = ?
+      `, modelPath, available ? 1 : 0, manufacturer.name, model.name,
+        available ? 'available' : 'missing', now, assetKey);
+    }
+  }
 
   for (const system of MECHANICAL_SYSTEMS) {
     await database.execute(`
@@ -429,13 +513,18 @@ export async function seedSmartWorkshopCatalogue(database: typeof db): Promise<C
       VALUES (?, ?, ?, 1, ?, ?)
     `, manufacturer.id, manufacturer.name, manufacturer.country, now, now);
     for (const model of manufacturer.models) {
+      const { assetKey, modelPath } = assetKeyFor(manufacturer.name, model.name, model.id);
+      const assetStatus = assetFileExists(modelPath) ? 'exact' : 'missing';
       await database.execute(`
         INSERT IGNORE INTO vehicle_models
           (id, manufacturer_id, name, body_style, image_path, asset_key, asset_status, specification_note, is_active, created_at, updated_at)
-        VALUES (?, ?, ?, ?, NULL, ?, 'representative', ?, 1, ?, ?)
-      `, model.id, manufacturer.id, model.name, model.body_style, genericAssetKey,
+        VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 1, ?, ?)
+      `, model.id, manufacturer.id, model.name, model.body_style, assetKey, assetStatus,
         'No verified technical specifications are recorded for this catalogue entry. Confirm engine, fuel, transmission and drive details against the vehicle or manufacturer service information before use.',
         now, now);
+      await database.execute(`
+        UPDATE vehicle_models SET asset_key = ?, asset_status = ?, updated_at = ? WHERE id = ?
+      `, assetKey, assetStatus, now, model.id);
       await database.execute(`
         INSERT IGNORE INTO vehicle_specifications
           (id, model_id, year_from, year_to, engine_type, engine_capacity_cc, fuel_type, transmission_type,

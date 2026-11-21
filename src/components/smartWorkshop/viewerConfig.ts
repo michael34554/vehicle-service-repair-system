@@ -1,8 +1,9 @@
-import type { ComponentKey, WorkshopStatus } from '@/shared/smartWorkshop';
+import type { WorkshopStatus } from '@/shared/smartWorkshop';
 
 export type ViewerMode = 'exterior' | 'interior' | 'mechanical' | 'exploded';
 export type ViewStyle = 'normal' | 'transparent' | 'exploded';
 export type CameraPreset = 'perspective' | 'front' | 'rear' | 'left' | 'right' | 'roof' | 'wheels';
+export type AssetAvailability = 'available' | 'missing' | 'representative_only' | 'disabled';
 
 export const STATUS_COLORS: Record<WorkshopStatus, string> = {
   green: '#22c55e',
@@ -21,21 +22,5 @@ export const CAMERA_PRESETS: Record<CameraPreset, { position: [number, number, n
   wheels: { position: [2.6, 0.5, -2.6], target: [-0.4, 0.35, -1.1] },
 };
 
-/** Named GLB nodes that represent a supported inspection component. */
-export const EXTERIOR_NODE_COMPONENTS: Record<string, ComponentKey> = {
-  wheel_fl: 'wheels_tyres',
-  wheel_fr: 'wheels_tyres',
-  wheel_rl: 'wheels_tyres',
-  wheel_rr: 'wheels_tyres',
-  rim_fl: 'wheels_tyres',
-  rim_fr: 'wheels_tyres',
-  rim_rl: 'wheels_tyres',
-  rim_rr: 'wheels_tyres',
-  tire: 'wheels_tyres',
-  brake: 'brakes',
-  steering_wheel: 'steering',
-  steering_column: 'steering',
-};
-
-export const MODEL_PATH = '/assets/models/ferrari.glb';
+/** Local Draco decoder for compressed GLB assets. No CDN is used. */
 export const DRACO_PATH = '/draco/';
