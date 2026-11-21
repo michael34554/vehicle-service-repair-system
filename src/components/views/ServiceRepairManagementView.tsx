@@ -264,11 +264,15 @@ function toCents(value: string): number | undefined {
 interface ServiceRepairManagementViewProps {
   initialJobId?: string | null;
   onInitialJobHandled?: () => void;
+  openCreate?: boolean;
+  onOpenCreateHandled?: () => void;
 }
 
 export const ServiceRepairManagementView: React.FC<ServiceRepairManagementViewProps> = ({
   initialJobId,
   onInitialJobHandled,
+  openCreate,
+  onOpenCreateHandled,
 }) => {
   const [records, setRecords] = useState<RepairJob[]>([]);
   const [summary, setSummary] = useState<RepairSummary | null>(null);
@@ -343,7 +347,7 @@ export const ServiceRepairManagementView: React.FC<ServiceRepairManagementViewPr
   useEffect(() => {
     const timer = window.setTimeout(() => void loadRecords(), query.trim() ? 250 : 0);
     return () => window.clearTimeout(timer);
-  }, [loadRecords]);
+  }, [loadRecords, query]);
 
   useEffect(() => {
     apiFetch('/api/auth/me')
@@ -584,6 +588,12 @@ export const ServiceRepairManagementView: React.FC<ServiceRepairManagementViewPr
       active = false;
     };
   }, [initialJobId, onInitialJobHandled, openDetails]);
+
+  useEffect(() => {
+    if (!openCreate) return;
+    openNew();
+    onOpenCreateHandled?.();
+  }, [openCreate, onOpenCreateHandled]);
 
   const updateStatus = async (nextStatus: RepairStatus) => {
     if (!selected) return;

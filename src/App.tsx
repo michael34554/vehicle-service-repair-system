@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Sidebar } from './components/Sidebar';
 import type { NavItemKey } from './components/Sidebar';
+import { canAccessNav, isStaffRole } from '../shared/permissions';
 import { TopHeader } from './components/TopHeader';
 import { ToastNotification, ToastMessage } from './components/ToastNotification';
 import { CustomerManagementView } from './components/views/CustomerManagementView';
@@ -16,6 +17,8 @@ import { CustomerAuthPage } from './components/CustomerAuthPage';
 import { CustomerDashboardView } from './components/views/CustomerDashboardView';
 import { AiDiagnosisView } from './components/views/AiDiagnosisView';
 import { SmartWorkshopView } from './components/views/SmartWorkshopView';
+import { MechanicManagementView } from './components/views/MechanicManagementView';
+import { MechanicWorkspaceView } from './components/views/MechanicWorkspaceView';
 
 type AppView = 'landing' | 'auth' | 'dashboard' | 'customer-auth' | 'customer-dashboard';
 export default function App() {
@@ -23,27 +26,33 @@ export default function App() {
   const [isCheckingSession, setIsCheckingSession] = useState(true);
   const [authMode, setAuthMode] = useState<AuthMode>('signin');
   const [activeTab, setActiveTab] = useState<NavItemKey>('dashboard');
-  const [isCollapsed, setIsCollapsed] = useState(false);
-  const [isDarkMode, setIsDarkMode] = useState(false);
+  const [isCollapsed, setIsCollapsed] = useState(() => localStorage.getItem('nextgen.sidebarCollapsed') === 'true');
+  const [isDarkMode, setIsDarkMode] = useState(() => localStorage.getItem('nextgen.darkMode') === 'true');
+  const [openRepairForm, setOpenRepairForm] = useState(false);
   const [unreadAlertsCount, setUnreadAlertsCount] = useState(0);
   const [selectedRepairId, setSelectedRepairId] = useState<string | null>(null);
   const [currentUser, setCurrentUser] = useState<{ name: string; role: string } | null>(null);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
-  // Sync dark mode class on document element
+  // Sync dark mode class and persist UI preferences.
   useEffect(() => {
     if (isDarkMode) {
       document.documentElement.classList.add('dark');
     } else {
       document.documentElement.classList.remove('dark');
     }
+    localStorage.setItem('nextgen.darkMode', String(isDarkMode));
   }, [isDarkMode]);
+
+  useEffect(() => {
+    localStorage.setItem('nextgen.sidebarCollapsed', String(isCollapsed));
+  }, [isCollapsed]);
 
   useEffect(() => {
     let isMounted = true;
     const onSessionExpired = () => {
       setAuthMode('signin');
-      setCurrentView((view) => view === 'dashboard' ? 'auth' : view);
+      setCurrentView((view) => view === 'dashboard' ? 'auth' : view === 'customer-dashboard' ? 'customer-auth' : view);
     };
     window.addEventListener('nextgen:session-expired', onSessionExpired);
     initializeCsrfToken()
@@ -51,7 +60,7 @@ export default function App() {
       .then(async (response) => {
         if (!response.ok) {
           if (response.status === 401) {
-            const customerResponse = await fetch('/api/customer/auth/me', { credentials: 'same-origin' });
+            const customerResponse = await apiFetch('/api/customer/auth/me');
             if (customerResponse.ok && isMounted) setCurrentView('customer-dashboard');
             return;
           }
@@ -83,10 +92,14 @@ export default function App() {
         const session = await response.json() as { user?: { name?: string; role?: string } | null };
         if (!response.ok) throw new Error(`Account details failed with status ${response.status}.`);
         if (active && session.user) {
+          const role = session.user.role ?? '';
           setCurrentUser({
             name: session.user.name ?? 'Signed-in user',
-            role: session.user.role ?? '',
+            role,
           });
+          setActiveTab((current) => canAccessNav(role, current)
+            ? current
+            : role === 'technician' ? 'mechanic_workspace' : 'dashboard');
         }
       })
       .catch((error: unknown) => {
@@ -97,13 +110,13 @@ export default function App() {
     };
   }, [currentView]);
 
-  const addToast = (type: 'success' | 'warning' | 'info', title: string, detail?: string) => {
+  const addToast = useCallback((type: 'success' | 'warning' | 'info', title: string, detail?: string) => {
     const id = `toast-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`;
     setToasts((prev) => [...prev, { id, type, title, detail }]);
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id));
     }, 4500);
-  };
+  }, []);
 
   const handleDismissToast = (id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
@@ -113,9 +126,13 @@ export default function App() {
     setUnreadAlertsCount(count);
   }, []);
 
+  const handleSelectTab = useCallback((tab: NavItemKey) => {
+    if (canAccessNav(currentUser?.role, tab)) setActiveTab(tab);
+  }, [currentUser?.role]);
+
   const handleViewRepair = (repairId: string) => {
     setSelectedRepairId(repairId);
-    setActiveTab('job_cards');
+    if (canAccessNav(currentUser?.role, 'job_cards')) setActiveTab('job_cards');
   };
 
   const handleSignOut = async () => {
@@ -198,7 +215,7 @@ export default function App() {
       <Sidebar
         activeTab={activeTab}
         user={currentUser}
-        onSelectTab={setActiveTab}
+        onSelectTab={handleSelectTab}
         isCollapsed={isCollapsed}
         onToggleCollapse={() => setIsCollapsed(!isCollapsed)}
         onSignOut={handleSignOut}
@@ -209,12 +226,18 @@ export default function App() {
         {/* Top Header Bar */}
         <TopHeader
           activeTab={activeTab}
+          userRole={currentUser?.role}
           isDarkMode={isDarkMode}
           onToggleDarkMode={() => setIsDarkMode(!isDarkMode)}
-          onOpenRepairManagement={() => setActiveTab('job_cards')}
-          onOpenVehicleManagement={() => setActiveTab('vehicles')}
+          onOpenRepairManagement={() => {
+            if (canAccessNav(currentUser?.role, 'job_cards')) {
+              setActiveTab('job_cards');
+              setOpenRepairForm(true);
+            }
+          }}
+          onOpenVehicleManagement={() => handleSelectTab('vehicles')}
           unreadAlertsCount={unreadAlertsCount}
-          onOpenWorkshopFloor={() => setActiveTab('dashboard')}
+          onOpenWorkshopFloor={() => handleSelectTab('dashboard')}
           onSignOut={handleSignOut}
         />
 
@@ -224,6 +247,8 @@ export default function App() {
             <WorkshopFloorLiveView
               onViewRepair={handleViewRepair}
               onAlertsCountChange={handleAlertsCountChange}
+              onNavigate={setActiveTab}
+              canManageModules={isStaffRole(currentUser?.role)}
             />
           ) : activeTab === 'vehicles' ? (
             <VehicleManagementView />
@@ -235,12 +260,18 @@ export default function App() {
             <AiDiagnosisView />
           ) : activeTab === 'smart_workshop' ? (
             <SmartWorkshopView onViewRepair={handleViewRepair} />
-          ) : (
+          ) : activeTab === 'mechanics' ? (
+            <MechanicManagementView onViewRepair={handleViewRepair} onNotify={addToast} />
+          ) : activeTab === 'mechanic_workspace' ? (
+            <MechanicWorkspaceView onViewRepair={handleViewRepair} onNotify={addToast} />
+          ) : activeTab === 'job_cards' ? (
             <ServiceRepairManagementView
               initialJobId={selectedRepairId}
               onInitialJobHandled={() => setSelectedRepairId(null)}
+              openCreate={openRepairForm}
+              onOpenCreateHandled={() => setOpenRepairForm(false)}
             />
-          )}
+          ) : null}
         </main>
       </div>
 

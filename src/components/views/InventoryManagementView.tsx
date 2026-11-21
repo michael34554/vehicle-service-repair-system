@@ -4,6 +4,8 @@ import {
   ArrowDownLeft,
   ArrowUpRight,
   Boxes,
+  ChevronLeft,
+  ChevronRight,
   ClipboardList,
   Download,
   LoaderCircle,
@@ -134,6 +136,8 @@ export const InventoryManagementView: React.FC = () => {
   const [query, setQuery] = useState('');
   const [stockFilter, setStockFilter] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('');
+  const [page, setPage] = useState(0);
+  const [totalParts, setTotalParts] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -165,7 +169,7 @@ export const InventoryManagementView: React.FC = () => {
   const loadData = useCallback(async () => {
     setLoading(true);
     setError('');
-    const params = new URLSearchParams({ limit: String(PAGE_SIZE) });
+    const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(page * PAGE_SIZE) });
     if (query.trim()) params.set('q', query.trim());
     if (stockFilter) params.set('stock', stockFilter);
     if (categoryFilter) params.set('category', categoryFilter);
@@ -179,6 +183,7 @@ export const InventoryManagementView: React.FC = () => {
       setSummary(dashboard.summary);
       setMovements(movementResult.records ?? []);
       setParts(partResult.records ?? []);
+      setTotalParts(partResult.total ?? 0);
       setCategories(partResult.categories ?? []);
       setSuppliers(supplierResult.records ?? []);
     } catch (loadError) {
@@ -186,7 +191,11 @@ export const InventoryManagementView: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [categoryFilter, query, request, stockFilter]);
+  }, [categoryFilter, page, query, request, stockFilter]);
+
+  useEffect(() => {
+    setPage(0);
+  }, [categoryFilter, query, stockFilter]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => void loadData(), query.trim() ? 200 : 0);
@@ -404,7 +413,7 @@ export const InventoryManagementView: React.FC = () => {
 
         {tab === 'parts' && <section className="overflow-hidden rounded-lg border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
           <div className="flex flex-col gap-3 border-b border-slate-200 p-4 dark:border-slate-800 lg:flex-row lg:items-center lg:justify-between">
-            <div><h2 className="font-semibold text-slate-900 dark:text-white">Parts catalogue</h2><p className="text-sm text-slate-500">{parts.length} matching records</p></div>
+            <div><h2 className="font-semibold text-slate-900 dark:text-white">Parts catalogue</h2><p className="text-sm text-slate-500">{totalParts} matching records · showing {parts.length} on this page</p></div>
             <div className="flex flex-col gap-2 sm:flex-row">
               <label className="relative"><Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search name or part number" className="w-full rounded-lg border border-slate-300 bg-white py-2 pl-9 pr-3 text-sm dark:border-slate-700 dark:bg-slate-950 dark:text-white sm:w-64" /></label>
               <select aria-label="Filter stock level" value={stockFilter} onChange={(event) => setStockFilter(event.target.value)} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-950 dark:text-white"><option value="">All stock levels</option><option value="available">In stock</option><option value="low">Low stock</option><option value="out">Out of stock</option></select>
@@ -412,6 +421,13 @@ export const InventoryManagementView: React.FC = () => {
             </div>
           </div>
           <div className="overflow-x-auto"><table className="w-full min-w-[900px] text-left text-sm"><thead className="bg-slate-50 text-xs uppercase text-slate-500 dark:bg-slate-950/70 dark:text-slate-400"><tr>{['Part', 'Category', 'Supplier', 'Stock', 'Purchase', 'Selling', 'Status', ''].map((label) => <th key={label} className="px-4 py-3 font-semibold">{label}</th>)}</tr></thead><tbody className="divide-y divide-slate-100 dark:divide-slate-800">{parts.length === 0 ? <tr><td colSpan={8} className="px-4 py-12 text-center text-slate-500">No parts match these filters.</td></tr> : parts.map((part) => <tr key={part.id} className="hover:bg-slate-50/70 dark:hover:bg-slate-800/30"><td className="px-4 py-3"><button type="button" onClick={() => setDetail(part)} className="text-left font-semibold text-slate-900 hover:text-blue-700 dark:text-white dark:hover:text-blue-300">{part.name}</button><p className="mt-0.5 text-xs text-slate-500">{part.part_number}</p></td><td className="px-4 py-3 text-slate-600 dark:text-slate-300">{part.category}</td><td className="px-4 py-3 text-slate-600 dark:text-slate-300">{part.supplier_name ?? part.supplier_name_legacy ?? '—'}</td><td className="px-4 py-3"><span className="font-semibold tabular-nums text-slate-900 dark:text-white">{part.quantity}</span><span className="ml-1 text-xs text-slate-500">/ {part.minimum_stock} min</span></td><td className="px-4 py-3 text-slate-600 dark:text-slate-300">{formatMoney(part.purchase_price_cents)}</td><td className="px-4 py-3 text-slate-600 dark:text-slate-300">{formatMoney(part.selling_price_cents)}</td><td className="px-4 py-3"><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${stockStatus(part).className}`}>{stockStatus(part).label}</span></td><td className="px-4 py-3"><div className="flex justify-end gap-1"><button type="button" onClick={() => setDetail(part)} title="View part" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"><ClipboardList className="h-4 w-4" /></button>{canManage && <><button type="button" onClick={() => openEditPart(part)} title="Edit part" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"><Pencil className="h-4 w-4" /></button><button type="button" onClick={() => void removePart(part)} title="Delete part" className="rounded-md p-2 text-slate-500 hover:bg-red-50 hover:text-red-700 dark:hover:bg-red-950/50"><X className="h-4 w-4" /></button></>}</div></td></tr>)}</tbody></table></div>
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 px-4 py-3 text-xs text-slate-500 dark:border-slate-800">
+            <span>Page {page + 1} of {Math.max(1, Math.ceil(totalParts / PAGE_SIZE))}</span>
+            <div className="flex items-center gap-2">
+              <button type="button" disabled={page === 0 || loading} onClick={() => setPage((current) => Math.max(0, current - 1))} className="inline-flex items-center gap-1 rounded-lg border border-slate-300 px-2.5 py-1.5 font-semibold disabled:opacity-40 dark:border-slate-700"><ChevronLeft className="h-3.5 w-3.5" /> Previous</button>
+              <button type="button" disabled={(page + 1) * PAGE_SIZE >= totalParts || loading} onClick={() => setPage((current) => current + 1)} className="inline-flex items-center gap-1 rounded-lg border border-slate-300 px-2.5 py-1.5 font-semibold disabled:opacity-40 dark:border-slate-700">Next <ChevronRight className="h-3.5 w-3.5" /></button>
+            </div>
+          </div>
         </section>}
 
         {tab === 'suppliers' && <section className="overflow-hidden rounded-lg border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">

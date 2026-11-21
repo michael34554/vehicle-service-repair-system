@@ -38,11 +38,14 @@ async function sendRequest(input: RequestInfo | URL, init: RequestInit = {}): Pr
   return fetch(input, { ...init, headers, credentials: 'same-origin' });
 }
 
-async function refreshSession(): Promise<boolean> {
+async function refreshSession(requestUrl: string): Promise<boolean> {
   const csrfToken = readCsrfCookie();
   if (!csrfToken) return false;
+  const endpoint = requestUrl.startsWith('/api/customer/')
+    ? '/api/customer/auth/refresh'
+    : '/api/auth/refresh';
   try {
-    const response = await fetch('/api/auth/refresh', {
+    const response = await fetch(endpoint, {
       method: 'POST',
       headers: { 'X-CSRF-TOKEN': csrfToken },
       credentials: 'same-origin',
@@ -64,7 +67,7 @@ export async function apiFetch(
     !requestUrl.startsWith('/api/auth/me');
   let response = await sendRequest(input, init);
 
-  if (response.status === 401 && retryUnauthorized && !isAuthOperation && await refreshSession()) {
+  if (response.status === 401 && retryUnauthorized && !isAuthOperation && await refreshSession(requestUrl)) {
     response = await sendRequest(input, init);
   }
 

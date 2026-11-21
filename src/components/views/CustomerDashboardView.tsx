@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { apiFetch } from '../../api';
 
 interface Vehicle {
   id: string;
@@ -24,6 +25,8 @@ interface Job {
   promised_at: string;
   created_at: string;
   updated_at: string;
+  assigned_mechanic_name?: string | null;
+  assigned_mechanic_specialization?: string | null;
 }
 
 interface StatusHistory {
@@ -45,8 +48,11 @@ export const CustomerDashboardView: React.FC = () => {
 
   useEffect(() => {
     setLoading(true);
-    fetch('/api/customer/vehicles')
-      .then((res) => res.json())
+    apiFetch('/api/customer/vehicles')
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`Vehicles request failed (${res.status}).`);
+        return res.json();
+      })
       .then((data) => setVehicles(data.vehicles || []))
       .catch(() => setError('Unable to load vehicles.'))
       .finally(() => setLoading(false));
@@ -57,8 +63,11 @@ export const CustomerDashboardView: React.FC = () => {
     setSelectedJob(null);
     setStatusHistory([]);
     setLoading(true);
-    fetch(`/api/customer/vehicles/${vehicle.id}/jobs`)
-      .then((res) => res.json())
+    apiFetch(`/api/customer/vehicles/${vehicle.id}/jobs`)
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`Jobs request failed (${res.status}).`);
+        return res.json();
+      })
       .then((data) => setJobs(data.jobs || []))
       .catch(() => setError('Unable to load jobs.'))
       .finally(() => setLoading(false));
@@ -67,8 +76,11 @@ export const CustomerDashboardView: React.FC = () => {
   const handleSelectJob = (job: Job) => {
     setSelectedJob(job);
     setLoading(true);
-    fetch(`/api/customer/jobs/${job.id}/status-history`)
-      .then((res) => res.json())
+    apiFetch(`/api/customer/jobs/${job.id}/status-history`)
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`Status history request failed (${res.status}).`);
+        return res.json();
+      })
       .then((data) => setStatusHistory(data.history || []))
       .catch(() => setError('Unable to load status history.'))
       .finally(() => setLoading(false));
@@ -100,6 +112,7 @@ export const CustomerDashboardView: React.FC = () => {
                   <li key={job.id} className={`py-3 cursor-pointer ${selectedJob?.id === job.id ? 'bg-blue-50' : ''}`} onClick={() => handleSelectJob(job)}>
                     <div className="font-medium">{job.service_type} – {job.repair_status}</div>
                     <div className="text-xs text-gray-500">Job #: {job.job_no} | Promised: {job.promised_at ? new Date(job.promised_at).toLocaleString() : 'N/A'}</div>
+                    <div className="mt-1 text-xs text-blue-700">Mechanic: {job.assigned_mechanic_name ?? 'Not yet assigned'}{job.assigned_mechanic_specialization ? ` · ${job.assigned_mechanic_specialization}` : ''}</div>
                   </li>
                 ))}
               </ul>

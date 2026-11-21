@@ -114,12 +114,13 @@ export function tokenLifetimeSeconds(type: TokenType): number {
 export function createClaims(
   identity: Pick<JwtClaims, 'sub' | 'wid' | 'role' | 'sid' | 'csrf'>,
   type: TokenType,
-  expiresAtSeconds?: number
+  expiresAtSeconds?: number,
+  jtiOverride?: string
 ): JwtClaims {
   const iat = Math.floor(Date.now() / 1000);
   return {
     ...identity,
-    jti: createJti(),
+    jti: jtiOverride ?? createJti(),
     type,
     iat,
     exp: Math.min(iat + tokenLifetimeSeconds(type), expiresAtSeconds ?? Number.MAX_SAFE_INTEGER),

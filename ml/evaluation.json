@@ -1,0 +1,325 @@
+{
+  "dataset": "data\\vehicle_fault_training.csv",
+  "dataset_examples": 384,
+  "categories": [
+    "Catalyst system efficiency",
+    "Cooling system temperature / thermostat",
+    "EVAP system leak",
+    "Engine misfire",
+    "Lean air-fuel mixture",
+    "Low system voltage / charging"
+  ],
+  "provenance": "synthetic_demo",
+  "provenance_counts": {
+    "synthetic_demo": 384
+  },
+  "structured_inputs": [
+    "symptom_text",
+    "manufacturer",
+    "model",
+    "engine_type",
+    "fuel_type",
+    "transmission_type",
+    "drive_type",
+    "inspection_findings",
+    "previous_faults",
+    "model_year",
+    "mileage",
+    "dtc_count"
+  ],
+  "evaluation": {
+    "method": "group-aware stratified holdout (StratifiedGroupKFold, 4 splits, first split, random_state=27) grouped by source symptom example; all preprocessing fitted inside each training pipeline",
+    "leakage_check": {
+      "train_source_examples": 36,
+      "test_source_examples": 12,
+      "overlapping_source_examples": 0
+    },
+    "train_examples": 288,
+    "test_examples": 96,
+    "models": [
+      {
+        "model": "random_forest",
+        "accuracy": 1.0,
+        "weighted_precision": 1.0,
+        "weighted_recall": 1.0,
+        "weighted_f1": 1.0,
+        "confusion_matrix_labels": [
+          "Catalyst system efficiency",
+          "Cooling system temperature / thermostat",
+          "EVAP system leak",
+          "Engine misfire",
+          "Lean air-fuel mixture",
+          "Low system voltage / charging"
+        ],
+        "confusion_matrix": [
+          [
+            16,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            16,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            16,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            16,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            16,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            0,
+            16
+          ]
+        ]
+      },
+      {
+        "model": "decision_tree",
+        "accuracy": 0.9166666666666666,
+        "weighted_precision": 0.9444444444444443,
+        "weighted_recall": 0.9166666666666666,
+        "weighted_f1": 0.9111111111111111,
+        "confusion_matrix_labels": [
+          "Catalyst system efficiency",
+          "Cooling system temperature / thermostat",
+          "EVAP system leak",
+          "Engine misfire",
+          "Lean air-fuel mixture",
+          "Low system voltage / charging"
+        ],
+        "confusion_matrix": [
+          [
+            8,
+            8,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            16,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            16,
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            16,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            16,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            0,
+            0,
+            16
+          ]
+        ]
+      },
+      {
+        "model": "naive_bayes",
+        "accuracy": 0.78125,
+        "weighted_precision": 0.8116782340466551,
+        "weighted_recall": 0.78125,
+        "weighted_f1": 0.7861673660524234,
+        "confusion_matrix_labels": [
+          "Catalyst system efficiency",
+          "Cooling system temperature / thermostat",
+          "EVAP system leak",
+          "Engine misfire",
+          "Lean air-fuel mixture",
+          "Low system voltage / charging"
+        ],
+        "confusion_matrix": [
+          [
+            10,
+            6,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            3,
+            13,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            3,
+            0,
+            12,
+            1,
+            0,
+            0
+          ],
+          [
+            0,
+            0,
+            0,
+            16,
+            0,
+            0
+          ],
+          [
+            1,
+            1,
+            1,
+            1,
+            11,
+            1
+          ],
+          [
+            2,
+            0,
+            0,
+            1,
+            0,
+            13
+          ]
+        ]
+      }
+    ],
+    "selected_model": "random_forest",
+    "confidence_calibration": {
+      "method": "isotonic regression on max holdout probability vs. correctness",
+      "fitted_examples": 96,
+      "artifact": "vehicle_fault_calibration.joblib"
+    },
+    "per_model": [
+      {
+        "manufacturer_model": "BMW / 3 Series",
+        "examples": 9,
+        "accuracy": 1.0
+      },
+      {
+        "manufacturer_model": "Ford / Focus",
+        "examples": 6,
+        "accuracy": 1.0
+      },
+      {
+        "manufacturer_model": "Ford / Ranger",
+        "examples": 6,
+        "accuracy": 1.0
+      },
+      {
+        "manufacturer_model": "Honda / Civic",
+        "examples": 4,
+        "accuracy": 1.0
+      },
+      {
+        "manufacturer_model": "Hyundai / Tucson",
+        "examples": 6,
+        "accuracy": 1.0
+      },
+      {
+        "manufacturer_model": "Mazda / 3",
+        "examples": 6,
+        "accuracy": 1.0
+      },
+      {
+        "manufacturer_model": "Mercedes-Benz / C-Class",
+        "examples": 10,
+        "accuracy": 1.0
+      },
+      {
+        "manufacturer_model": "Mitsubishi / Outlander",
+        "examples": 5,
+        "accuracy": 1.0
+      },
+      {
+        "manufacturer_model": "Nissan / Note",
+        "examples": 7,
+        "accuracy": 1.0
+      },
+      {
+        "manufacturer_model": "Nissan / X-Trail",
+        "examples": 7,
+        "accuracy": 1.0
+      },
+      {
+        "manufacturer_model": "Toyota / Camry",
+        "examples": 6,
+        "accuracy": 1.0
+      },
+      {
+        "manufacturer_model": "Toyota / Corolla",
+        "examples": 6,
+        "accuracy": 1.0
+      },
+      {
+        "manufacturer_model": "Toyota / Hilux",
+        "examples": 7,
+        "accuracy": 1.0
+      },
+      {
+        "manufacturer_model": "Volkswagen / Golf",
+        "examples": 6,
+        "accuracy": 1.0
+      },
+      {
+        "manufacturer_model": "Volkswagen / Passat",
+        "examples": 5,
+        "accuracy": 1.0
+      }
+    ]
+  },
+  "data_limitations": "The bundled training rows are synthetic demonstration data derived from 48 curated OBD-II symptom descriptions. Vehicle context (manufacturer, model, year, engine, mileage, fuel, transmission, drive, inspection findings and previous faults) is generated independently of the fault label, so it has no validated diagnostic signal. These results are not real-world workshop accuracy and must not be used as manufacturer failure statistics. Replace the corpus with mechanic-verified cases and retrain before operational use.",
+  "prediction_warning": "AI suggestions are not a diagnosis. A qualified mechanic must inspect and verify the vehicle before repair decisions. Confidence values are calibrated estimates, not verified probabilities of component failure.",
+  "model_version": "tfidf-rf-context-calibrated-d79a2198f09611a0",
+  "library_version": "scikit-learn 1.8.0",
+  "generated_at": "2026-11-21T08:54:10.177707+00:00"
+}

@@ -4,21 +4,31 @@ import {
   AlertCircle,
   AlertTriangle,
   ArrowUpRight,
+  Box,
+  Boxes,
   CalendarClock,
+  Car,
   CarFront,
   CheckCircle2,
   Clock3,
+  FileSpreadsheet,
+  LayoutDashboard,
   LoaderCircle,
   RefreshCw,
   Search,
   Signal,
   SignalHigh,
   SignalLow,
+  Stethoscope,
+  UserCog,
   UserRound,
+  Users,
   Wrench,
   X,
 } from 'lucide-react';
 import { apiFetch } from '../../api';
+import type { NavItemKey } from '../Sidebar';
+import { BayRegistryPanel } from '../smartWorkshop/BayRegistryPanel';
 
 type RepairStatus =
   | 'Received'
@@ -149,7 +159,44 @@ interface ApiError {
 interface Props {
   onViewRepair: (repairId: string) => void;
   onAlertsCountChange: (count: number) => void;
+  onNavigate: (tab: NavItemKey) => void;
+  canManageModules: boolean;
 }
+
+type ModuleStatKey = 'customers' | 'vehicles' | 'mechanics' | 'parts' | 'activeRepairs' | 'workshopVehicles';
+
+type ModuleStats = Partial<Record<ModuleStatKey, number>>;
+
+interface ModuleShortcut {
+  key: NavItemKey;
+  label: string;
+  description: string;
+  icon: React.ComponentType<{ className?: string }>;
+  stat?: ModuleStatKey;
+  statUnit?: string;
+}
+
+const MODULE_SHORTCUTS: ModuleShortcut[] = [
+  { key: 'customers', label: 'Customer Management', description: 'Register customers, manage records, and review their vehicle history.', icon: Users, stat: 'customers', statUnit: 'customers' },
+  { key: 'vehicles', label: 'Vehicle Management', description: 'Maintain vehicle profiles, ownership, and service history.', icon: Car, stat: 'vehicles', statUnit: 'vehicles' },
+  { key: 'mechanics', label: 'Mechanic Management', description: 'Manage mechanic profiles, availability, assignments, and performance.', icon: UserCog, stat: 'mechanics', statUnit: 'mechanics' },
+  { key: 'job_cards', label: 'Service and Repair Management', description: 'Create repair jobs, assign mechanics, and track repair progress.', icon: FileSpreadsheet, stat: 'activeRepairs', statUnit: 'repairs in progress' },
+  { key: 'inventory', label: 'Spare Parts and Inventory Management', description: 'Track stock, issue parts, monitor low stock, and review transactions.', icon: Boxes, stat: 'parts', statUnit: 'parts' },
+  { key: 'diagnosis', label: 'AI Fault Diagnosis', description: 'Record symptoms and review AI-predicted faults and recommendations.', icon: Stethoscope },
+  { key: 'smart_workshop', label: 'AI Smart Workshop', description: 'Inspect vehicles and components in the interactive 3D workshop.', icon: Box },
+  { key: 'dashboard', label: 'Workshop Floor Live', description: 'Monitor live vehicles, repairs, mechanic workload, and alerts.', icon: LayoutDashboard, stat: 'workshopVehicles', statUnit: 'vehicles in workshop' },
+];
+
+const SHORTCUT_ICON_STYLES = [
+  'bg-blue-50 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300',
+  'bg-sky-50 text-sky-700 dark:bg-sky-950/40 dark:text-sky-300',
+  'bg-indigo-50 text-indigo-700 dark:bg-indigo-950/40 dark:text-indigo-300',
+  'bg-violet-50 text-violet-700 dark:bg-violet-950/40 dark:text-violet-300',
+  'bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300',
+  'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300',
+  'bg-fuchsia-50 text-fuchsia-700 dark:bg-fuchsia-950/40 dark:text-fuchsia-300',
+  'bg-cyan-50 text-cyan-700 dark:bg-cyan-950/40 dark:text-cyan-300',
+];
 
 const REFRESH_INTERVAL_MS = 10_000;
 
@@ -226,12 +273,13 @@ function apiError(result: ApiError, fallback: string): string {
   return result.message ?? result.error ?? fallback;
 }
 
-export const WorkshopFloorLiveView: React.FC<Props> = ({ onViewRepair, onAlertsCountChange }) => {
+export const WorkshopFloorLiveView: React.FC<Props> = ({ onViewRepair, onAlertsCountChange, onNavigate, canManageModules }) => {
   const [data, setData] = useState<FloorData | null>(null);
   const [connection, setConnection] = useState<ConnectionState>('reconnecting');
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [moduleStats, setModuleStats] = useState<ModuleStats>({});
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [mechanicFilter, setMechanicFilter] = useState('');
@@ -308,6 +356,37 @@ export const WorkshopFloorLiveView: React.FC<Props> = ({ onViewRepair, onAlertsC
     };
   }, [refresh]);
 
+  useEffect(() => {
+    if (!canManageModules) {
+      setModuleStats({});
+      return;
+    }
+    let active = true;
+    type StatResponse = { total?: number; registeredTotal?: number; summary?: Record<string, number> };
+    const readNumber = async (url: string, pick: (result: StatResponse) => unknown): Promise<number | undefined> => {
+      const response = await apiFetch(url);
+      if (!response.ok) return undefined;
+      const result = await response.json() as StatResponse;
+      const value = pick(result);
+      return typeof value === 'number' ? value : undefined;
+    };
+    void Promise.allSettled([
+      readNumber('/api/customers?limit=1', (result) => result.registeredTotal ?? result.total),
+      readNumber('/api/vehicles?limit=1', (result) => result.total),
+      readNumber('/api/mechanics/dashboard', (result) => result.summary?.total_mechanics),
+      readNumber('/api/inventory/dashboard', (result) => result.summary?.total_parts),
+    ]).then(([customers, vehicles, mechanics, parts]) => {
+      if (!active) return;
+      setModuleStats({
+        customers: customers.status === 'fulfilled' ? customers.value : undefined,
+        vehicles: vehicles.status === 'fulfilled' ? vehicles.value : undefined,
+        mechanics: mechanics.status === 'fulfilled' ? mechanics.value : undefined,
+        parts: parts.status === 'fulfilled' ? parts.value : undefined,
+      });
+    });
+    return () => { active = false; };
+  }, [canManageModules]);
+
   const filteredJobs = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase();
     return (data?.jobs ?? []).filter((job) => {
@@ -354,6 +433,11 @@ export const WorkshopFloorLiveView: React.FC<Props> = ({ onViewRepair, onAlertsC
   const serviceOptions = [...new Set((data?.jobs ?? []).map((job) => job.service_type))].sort();
   const connectionDetails = CONNECTION[connection];
   const ConnectionIcon = connectionDetails.Icon;
+  const shortcutStats: ModuleStats = {
+    ...moduleStats,
+    activeRepairs: summary?.repairs_in_progress,
+    workshopVehicles: summary?.total_vehicles_in_workshop,
+  };
 
   return (
     <section className="space-y-6 pb-8">
@@ -387,6 +471,54 @@ export const WorkshopFloorLiveView: React.FC<Props> = ({ onViewRepair, onAlertsC
         </div>
       )}
 
+      {canManageModules && (
+        <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
+          <div className="border-b border-slate-200 px-4 py-4 dark:border-slate-800">
+            <h2 className="text-base font-semibold text-slate-900 dark:text-white">Module shortcuts</h2>
+            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+              Open any NEXTGEN module in the standard workflow order. Counts are read from live workshop records.
+            </p>
+          </div>
+          <div className="grid gap-3 p-4 sm:grid-cols-2 xl:grid-cols-4">
+            {MODULE_SHORTCUTS.map((shortcut, index) => {
+              const Icon = shortcut.icon;
+              const statValue = shortcut.stat ? shortcutStats[shortcut.stat] : undefined;
+              const statText = !shortcut.stat
+                ? 'Open module'
+                : loading && !data
+                  ? '—'
+                  : statValue === undefined
+                    ? 'Live records'
+                    : `${statValue} ${shortcut.statUnit ?? ''}`.trim();
+
+              return (
+                <button
+                  key={shortcut.key}
+                  type="button"
+                  onClick={() => onNavigate(shortcut.key)}
+                  className="group flex flex-col rounded-xl border border-slate-200 bg-slate-50/60 p-4 text-left transition hover:-translate-y-0.5 hover:border-blue-300 hover:bg-white hover:shadow-md dark:border-slate-800 dark:bg-slate-950/40 dark:hover:border-blue-800 dark:hover:bg-slate-900"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <span className={`rounded-xl p-2.5 ${SHORTCUT_ICON_STYLES[index % SHORTCUT_ICON_STYLES.length]}`}>
+                      <Icon className="h-5 w-5" />
+                    </span>
+                    <span className="text-[10px] font-bold tracking-wider text-slate-400">
+                      {String(index + 1).padStart(2, '0')}
+                    </span>
+                  </div>
+                  <h3 className="mt-3 text-sm font-semibold text-slate-900 dark:text-white">{shortcut.label}</h3>
+                  <p className="mt-1 flex-1 text-xs leading-5 text-slate-500 dark:text-slate-400">{shortcut.description}</p>
+                  <div className="mt-3 flex items-center justify-between border-t border-slate-200 pt-3 dark:border-slate-800">
+                    <span className="text-xs font-semibold text-blue-700 dark:text-blue-300">{statText}</span>
+                    <ArrowUpRight className="h-4 w-4 text-slate-400 transition group-hover:text-blue-600 dark:group-hover:text-blue-300" />
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-7">
         {summaryCards.map(({ label, value, icon: Icon, style }) => (
           <article key={label} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
@@ -404,8 +536,9 @@ export const WorkshopFloorLiveView: React.FC<Props> = ({ onViewRepair, onAlertsC
       <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
         <div className="border-b border-slate-200 px-4 py-4 dark:border-slate-800">
           <h2 className="text-base font-semibold text-slate-900 dark:text-white">Workshop bays</h2>
-          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">Bay names are read from existing repair jobs. Assign a bay in Service &amp; Repair Management to track it here.</p>
+          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">Registered bays and bay names already used on repair jobs are both shown. Assign a bay in Service &amp; Repair Management to track occupancy here.</p>
         </div>
+        <div className="p-4 pb-0"><BayRegistryPanel canManage={canManageModules} onChanged={() => void refresh(true)} /></div>
         <div className="grid gap-3 p-4 sm:grid-cols-3">
           {[
             { label: 'Known bays', value: bays.length },

@@ -1,4 +1,6 @@
 import React from 'react';
+import { canAccessNav, type NavItemKey } from '../../shared/permissions';
+export type { NavItemKey } from '../../shared/permissions';
 import {
   LayoutDashboard,
   Users,
@@ -11,16 +13,9 @@ import {
   Gauge,
   Stethoscope,
   Box,
+  UserCog,
+  Wrench,
 } from 'lucide-react';
-
-export type NavItemKey =
-  | 'dashboard'
-  | 'customers'
-  | 'vehicles'
-  | 'inventory'
-  | 'job_cards'
-  | 'diagnosis'
-  | 'smart_workshop';
 
 interface SidebarProps {
   activeTab: NavItemKey;
@@ -38,13 +33,18 @@ interface NavItemDef {
 }
 
 const NAV_ITEMS: NavItemDef[] = [
-  { key: 'dashboard', label: 'Workshop Floor Live', icon: LayoutDashboard },
-  { key: 'job_cards', label: 'Service & Repair Management', icon: FileSpreadsheet },
+  { key: 'customers', label: 'Customer Management', icon: Users },
+  { key: 'vehicles', label: 'Vehicle Management', icon: Car },
+  { key: 'mechanics', label: 'Mechanic Management', icon: UserCog },
+  { key: 'job_cards', label: 'Service and Repair Management', icon: FileSpreadsheet },
+  { key: 'inventory', label: 'Spare Parts and Inventory Management', icon: Boxes },
   { key: 'diagnosis', label: 'AI Fault Diagnosis', icon: Stethoscope },
   { key: 'smart_workshop', label: 'AI Smart Workshop', icon: Box },
-  { key: 'inventory', label: 'Spare Parts & Inventory', icon: Boxes },
-  { key: 'vehicles', label: 'Vehicle Management', icon: Car },
-  { key: 'customers', label: 'Customer Management', icon: Users },
+  { key: 'dashboard', label: 'Workshop Floor Live', icon: LayoutDashboard },
+];
+
+const PERSONAL_ITEMS: NavItemDef[] = [
+  { key: 'mechanic_workspace', label: 'Mechanic Workspace', icon: Wrench },
 ];
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -62,12 +62,46 @@ export const Sidebar: React.FC<SidebarProps> = ({
     advisor: 'Workshop Staff',
     technician: 'Mechanic',
   };
+  const visibleItems = NAV_ITEMS.filter((item) => canAccessNav(user?.role, item.key));
+  const visiblePersonalItems = PERSONAL_ITEMS.filter((item) => canAccessNav(user?.role, item.key));
   const initials = displayName
     .split(/\s+/)
     .filter(Boolean)
     .slice(0, 2)
     .map((part) => part[0].toLocaleUpperCase())
     .join('') || 'U';
+
+  const renderNavItem = (item: NavItemDef) => {
+    const Icon = item.icon;
+    const isActive = activeTab === item.key;
+
+    return (
+      <button
+        key={item.key}
+        onClick={() => onSelectTab(item.key)}
+        title={isCollapsed ? item.label : undefined}
+        className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-lg text-sm font-medium transition-colors group relative ${
+          isActive
+            ? 'bg-blue-600 text-white shadow-sm font-semibold'
+            : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
+        }`}
+      >
+        <Icon
+          className={`w-4 h-4 shrink-0 transition-transform duration-200 group-hover:scale-105 ${
+            isActive ? 'text-white' : 'text-slate-400 group-hover:text-slate-200'
+          }`}
+        />
+        {!isCollapsed && (
+          <span className="truncate flex-1 text-left whitespace-nowrap">
+            {item.label}
+          </span>
+        )}
+        {isCollapsed && isActive && (
+          <div className="absolute right-0 top-1/2 -translate-y-1/2 w-1 h-6 bg-blue-400 rounded-l" />
+        )}
+      </button>
+    );
+  };
 
   return (
     <aside
@@ -111,40 +145,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
       {/* Navigation Links */}
       <div className="flex-1 overflow-y-auto px-3 py-3 space-y-1">
-        {NAV_ITEMS.map((item) => {
-          const Icon = item.icon;
-          const isActive = activeTab === item.key;
-
-          return (
-            <button
-              key={item.key}
-              onClick={() => onSelectTab(item.key)}
-              title={isCollapsed ? item.label : undefined}
-              className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-lg text-sm font-medium transition-colors group relative ${
-                isActive
-                  ? 'bg-blue-600 text-white shadow-sm font-semibold'
-                  : 'text-slate-300 hover:bg-slate-800/80 hover:text-white'
-              }`}
-            >
-              <Icon
-                className={`w-4 h-4 shrink-0 transition-transform duration-200 group-hover:scale-105 ${
-                  isActive ? 'text-white' : 'text-slate-400 group-hover:text-slate-200'
-                }`}
-              />
-
-              {!isCollapsed && (
-                <span className="truncate flex-1 text-left whitespace-nowrap">
-                  {item.label}
-                </span>
-              )}
-
-              {/* Collapsed active indicator bar */}
-              {isCollapsed && isActive && (
-                <div className="absolute right-0 top-1/2 -translate-y-1/2 w-1 h-6 bg-blue-400 rounded-l" />
-              )}
-            </button>
-          );
-        })}
+        {visibleItems.map(renderNavItem)}
+        {visiblePersonalItems.length > 0 && (
+          <div className="mt-3 border-t border-slate-800 pt-3">
+            {!isCollapsed && (
+              <p className="px-3.5 pb-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                My workspace
+              </p>
+            )}
+            {visiblePersonalItems.map(renderNavItem)}
+          </div>
+        )}
       </div>
 
       {/* Collapse button when collapsed */}

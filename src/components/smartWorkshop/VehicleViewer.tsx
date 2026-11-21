@@ -2,11 +2,11 @@ import { Suspense, useEffect, useRef, useState, type RefObject } from 'react';
 import { Canvas, useThree } from '@react-three/fiber';
 import { ContactShadows, OrbitControls, useProgress } from '@react-three/drei';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
-import type { ComponentKey, ComponentStatus } from '@/shared/smartWorkshop';
+import type { ComponentKey, ComponentStatus, WorkshopStatus } from '@/shared/smartWorkshop';
 import { ExteriorVehicle } from './ExteriorVehicle';
 import { MechanicalAssembly } from './MechanicalAssembly';
 import { ErrorBoundary } from './ErrorBoundary';
-import { CAMERA_PRESETS, type CameraPreset, type ViewerMode, type ViewStyle } from './viewerConfig';
+import { CAMERA_PRESETS, STATUS_COLORS, type CameraPreset, type ViewerMode, type ViewStyle } from './viewerConfig';
 
 interface Props {
   statuses: Record<ComponentKey, ComponentStatus>;
@@ -16,6 +16,10 @@ interface Props {
   preset: CameraPreset;
   resetToken: number;
   onSelect: (key: ComponentKey | null) => void;
+  modelPath?: string;
+  nodeMap?: Record<string, ComponentKey>;
+  focusSelected?: boolean;
+  selectedLabel?: string | null;
 }
 
 function CameraController({ preset, resetToken, controls }: {
@@ -38,7 +42,10 @@ function CameraController({ preset, resetToken, controls }: {
 
 function Scene({ props }: { props: Props }) {
   const controls = useRef<OrbitControlsImpl>(null);
-  const showBody = props.mode === 'exterior' || props.style === 'transparent' || props.style === 'exploded';
+  const bodyStyle: ViewStyle = props.mode === 'interior' || props.mode === 'exploded' ? 'transparent' : props.style;
+  const showBody = props.mode !== 'mechanical';
+  const showAssembly = props.mode !== 'exterior' || props.style === 'exploded';
+  const assemblyStyle: ViewStyle = props.mode === 'exploded' || props.style === 'exploded' ? 'exploded' : 'normal';
   return (
     <>
       <color attach="background" args={['#0b1220']} />
@@ -54,19 +61,24 @@ function Scene({ props }: { props: Props }) {
       <Suspense fallback={null}>
         {showBody && (
           <ExteriorVehicle
+            key={props.modelPath ?? 'default-model'}
             statuses={props.statuses}
             selected={props.selected}
-            style={props.mode === 'exterior' ? props.style : 'transparent'}
+            style={bodyStyle}
             onSelect={props.onSelect}
             interactive={props.mode === 'exterior'}
+            modelPath={props.modelPath}
+            nodeMap={props.nodeMap}
+            focusSelected={props.focusSelected}
           />
         )}
-        {props.mode === 'internal' && (
+        {showAssembly && (
           <MechanicalAssembly
             statuses={props.statuses}
             selected={props.selected}
-            style={props.style}
+            style={assemblyStyle}
             onSelect={props.onSelect}
+            focusSelected={props.focusSelected}
           />
         )}
       </Suspense>
@@ -100,6 +112,9 @@ function LoadingOverlay() {
 
 export default function VehicleViewer(props: Props) {
   const [failure, setFailure] = useState('');
+  const selectedStatus: WorkshopStatus | null = props.selected
+    ? props.statuses[props.selected]?.status ?? 'grey'
+    : null;
 
   useEffect(() => {
     document.body.style.cursor = '';
@@ -132,6 +147,15 @@ export default function VehicleViewer(props: Props) {
         </Canvas>
       </ErrorBoundary>
       {!failure && <LoadingOverlay />}
+      {props.selected && props.selectedLabel && selectedStatus && (
+        <div className="pointer-events-none absolute left-3 top-3 rounded-md border border-slate-700/80 bg-slate-900/85 px-3 py-2 text-xs text-slate-100 shadow-lg" role="status">
+          <span className="inline-flex items-center gap-2 font-semibold">
+            <span className="h-2 w-2 rounded-full" style={{ backgroundColor: STATUS_COLORS[selectedStatus] }} />
+            {props.selectedLabel}
+          </span>
+          <span className="mt-0.5 block text-[11px] capitalize text-slate-400">{selectedStatus} status</span>
+        </div>
+      )}
       {failure && (
         <div className="pointer-events-none absolute bottom-3 left-3 rounded-md bg-red-950/80 px-3 py-1.5 text-xs text-red-200" role="alert">
           {failure}

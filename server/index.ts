@@ -4,10 +4,13 @@ import { randomBytes, randomUUID, scrypt, scryptSync, timingSafeEqual } from 'no
 import express, { NextFunction, Request, RequestHandler, Response } from 'express';
 import PDFDocument from 'pdfkit';
 import ExcelJS from 'exceljs';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createServer as createViteServer } from 'vite';
 import { db, initializeDatabase } from './db';
+import { registerMechanicRoutes } from './mechanics';
+import { registerSmartWorkshopCatalogueRoutes } from './smartWorkshopCatalogue';
+import { seedSmartWorkshopCatalogue } from './smartWorkshopSeed';
 import {
   COMPONENT_KEYS,
   INSPECTION_CONDITIONS,
@@ -15,13 +18,13 @@ import {
   componentForFault,
   deriveComponentStatuses,
   isComponentKey,
-  type ComponentKey,
   type SmartWorkshopInspection,
   type SmartWorkshopPrediction,
 } from '../shared/smartWorkshop';
 import {
   createClaims,
   createCsrfToken,
+  createJti,
   JwtClaims,
   JwtError,
   signJwt,
@@ -29,12 +32,11 @@ import {
   TokenType,
   verifyJwt,
   WorkshopRole,
-  CustomerRole,
-  AnyRole,
   isCustomerRole,
-  isAnyRole
 } from './jwt';
+import { isStaffRole } from '../shared/permissions';
 
+const IS_PRODUCTION = process.env.NODE_ENV === 'production' || process.argv.includes('--production');
 const ACCESS_COOKIE = 'nextgen_access';
 const REFRESH_COOKIE = 'nextgen_refresh';
 const CSRF_COOKIE = 'nextgen_csrf';
@@ -44,7 +46,6 @@ const SCRYPT_OPTIONS = { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
 // For customer accounts
 const CUSTOMER_ACCESS_COOKIE = 'nextgen_customer_access';
 const CUSTOMER_REFRESH_COOKIE = 'nextgen_customer_refresh';
-const CUSTOMER_CSRF_COOKIE = 'nextgen_customer_csrf';
 // Utility: set customer auth cookies
 function setCustomerAuthCookies(response: Response, accessToken: string, refreshToken: string, csrfToken: string): void {
   setCookie(response, CUSTOMER_ACCESS_COOKIE, accessToken, tokenLifetimeSeconds('access'), '/api/customer', true);
@@ -55,6 +56,85 @@ function setCustomerAuthCookies(response: Response, accessToken: string, refresh
 function clearCustomerAuthCookies(response: Response): void {
   setCookie(response, CUSTOMER_ACCESS_COOKIE, '', 0, '/api/customer', true);
   setCookie(response, CUSTOMER_REFRESH_COOKIE, '', 0, '/api/customer/auth', true);
+}
+
+// Second precision keeps newly issued JWT `iat` values aligned with revocation timestamps.
+function sessionClockNow(): string {
+  return new Date(Math.floor(Date.now() / 1000) * 1000).toISOString();
+}
+
+interface CustomerTokenAccount {
+  id: string;
+  customer_id: string;
+  workshop_id: string;
+}
+
+async function issueCustomerTokenPair(
+  sessionId: string,
+  account: CustomerTokenAccount,
+  csrf: string,
+  absoluteExpiresAtSeconds: number
+): Promise<{ accessToken: string; refreshToken: string; accessJti: string; refreshJti: string }> {
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const now = new Date(nowSeconds * 1000).toISOString();
+  const identity = {
+    sub: account.customer_id,
+    wid: account.workshop_id,
+    role: 'customer' as const,
+    sid: sessionId,
+    csrf,
+  };
+  const accessJti = createJti();
+  const refreshJti = createJti();
+  const accessClaims = createClaims(identity, 'access', absoluteExpiresAtSeconds, accessJti);
+  const refreshClaims = createClaims(identity, 'refresh', absoluteExpiresAtSeconds, refreshJti);
+  await db.transaction(async () => {
+    await db.execute(`
+      INSERT INTO customer_jwt_tokens (jti, session_id, token_type, expires_at, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `, accessJti, sessionId, 'access', new Date(accessClaims.exp * 1000).toISOString(), now);
+    await db.execute(`
+      INSERT INTO customer_jwt_tokens (jti, session_id, token_type, expires_at, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `, refreshJti, sessionId, 'refresh', new Date(refreshClaims.exp * 1000).toISOString(), now);
+    await db.execute('UPDATE customer_sessions SET last_used_at = ? WHERE id = ? AND revoked_at IS NULL', now, sessionId);
+  });
+  return {
+    accessToken: signJwt(accessClaims),
+    refreshToken: signJwt(refreshClaims),
+    accessJti,
+    refreshJti,
+  };
+}
+
+async function createCustomerSession(account: CustomerTokenAccount, csrf: string): Promise<{ accessToken: string; refreshToken: string }> {
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const now = new Date(nowSeconds * 1000).toISOString();
+  const sessionId = randomUUID();
+  const expiresAt = new Date((nowSeconds + tokenLifetimeSeconds('refresh')) * 1000).toISOString();
+  const absoluteExpiresAt = new Date((nowSeconds + ABSOLUTE_SESSION_DURATION_SECONDS) * 1000).toISOString();
+  await db.execute(`
+    INSERT INTO customer_sessions (
+      id, customer_account_id, customer_id, workshop_id,
+      created_at, expires_at, absolute_expires_at, last_used_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `, sessionId, account.id, account.customer_id, account.workshop_id, now, expiresAt, absoluteExpiresAt, now);
+  return await issueCustomerTokenPair(sessionId, account, csrf, Math.floor(new Date(absoluteExpiresAt).getTime() / 1000));
+}
+
+async function revokeCustomerSession(sessionId: string, at = sessionClockNow()): Promise<void> {
+  await db.transaction(async () => {
+    await db.execute('UPDATE customer_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL', at, sessionId);
+    await db.execute('UPDATE customer_jwt_tokens SET revoked_at = ? WHERE session_id = ? AND revoked_at IS NULL', at, sessionId);
+  });
+}
+
+async function revokeCustomerToken(jti: string, replacementJti: string | null, at = sessionClockNow()): Promise<void> {
+  await db.execute(`
+    UPDATE customer_jwt_tokens
+    SET revoked_at = ?, replaced_by_jti = ?
+    WHERE jti = ? AND revoked_at IS NULL
+  `, at, replacementJti, jti);
 }
 
 // Customer session validation middleware
@@ -71,21 +151,32 @@ async function validateCustomerAuth(request: express.Request, response: Response
     response.status(401).json({ error: error instanceof JwtError && error.code === 'expired' ? 'access_token_expired' : 'authentication_required' });
     return false;
   }
-  // Validate session from DB
-  const now = new Date().toISOString();
+
+  // Explicitly bind the CSRF claim to the cookie on every customer request.
+  const csrfCookie = readCookie(request, CSRF_COOKIE);
+  if (!csrfCookie || !constantTimeMatch(csrfCookie, claims.csrf)) {
+    response.status(401).json({ error: 'csrf_validation_failed' });
+    return false;
+  }
+
   const auth = await db.first(`
-    SELECT ca.id as account_id, ca.customer_id, ca.workshop_id, ca.email, c.display_name, ca.id as session_id, ? as csrf
-    FROM customer_accounts ca
+    SELECT ca.id AS account_id, ca.customer_id, ca.workshop_id, ca.email,
+           c.display_name, cs.id AS session_id, cs.absolute_expires_at, ca.updated_at
+    FROM customer_jwt_tokens tok
+    JOIN customer_sessions cs ON cs.id = tok.session_id AND cs.revoked_at IS NULL
+    JOIN customer_accounts ca ON ca.id = cs.customer_account_id
     JOIN customers c ON c.id = ca.customer_id AND c.workshop_id = ca.workshop_id
-    WHERE ca.id = ? AND ca.workshop_id = ? AND ca.customer_id = ?
-  `, claims.sid, claims.sub, claims.wid, claims.sub) as {
+    WHERE tok.jti = ? AND tok.token_type = 'access' AND tok.revoked_at IS NULL
+      AND ca.id = ? AND ca.workshop_id = ? AND ca.customer_id = ?
+  `, claims.jti, claims.sid, claims.wid, claims.sub) as {
     account_id: string;
     customer_id: string;
     workshop_id: string;
     email: string;
     display_name: string;
     session_id: string;
-    csrf: string;
+    absolute_expires_at: string;
+    updated_at: string;
   } | undefined;
   if (!auth) {
     response.status(401).json({ error: 'authentication_required' });
@@ -95,7 +186,20 @@ async function validateCustomerAuth(request: express.Request, response: Response
     response.status(403).json({ error: 'account_role_not_supported' });
     return false;
   }
-  response.locals.customer = auth;
+
+  const absoluteExpiry = new Date(auth.absolute_expires_at).getTime();
+  const accountUpdated = new Date(auth.updated_at).getTime();
+  if (Number.isFinite(absoluteExpiry) && absoluteExpiry <= Date.now()) {
+    response.status(401).json({ error: 'session_expired' });
+    return false;
+  }
+  if (Number.isFinite(accountUpdated) && claims.iat * 1000 < accountUpdated) {
+    response.status(401).json({ error: 'session_revoked' });
+    return false;
+  }
+  await db.execute('UPDATE customer_sessions SET last_used_at = ? WHERE id = ?', sessionClockNow(), auth.session_id);
+
+  response.locals.customer = { ...auth, csrf: claims.csrf };
   return true;
 }
 
@@ -107,6 +211,8 @@ function requireCustomerAuth(request: express.Request, response: Response, next:
 const DUMMY_SALT = Buffer.alloc(16, 23);
 const DUMMY_HASH = scryptSync('nextgen-invalid-login-dummy', DUMMY_SALT, 64, SCRYPT_OPTIONS);
 await initializeDatabase();
+// Versioned migration 005 creates the catalogue tables; the seed is idempotent.
+await seedSmartWorkshopCatalogue(db);
 
 function derivePassword(password: string, salt: Buffer): Promise<Buffer> {
   return new Promise((resolve, reject) => {
@@ -129,7 +235,7 @@ interface AuthContext {
   csrf: string;
 }
 
-class HttpError extends Error {
+export class HttpError extends Error {
   constructor(
     public readonly status: number,
     message: string
@@ -202,7 +308,7 @@ function constantTimeMatch(left: string, right: string): boolean {
 }
 
 function setCookie(response: Response, name: string, value: string, maxAge: number, path: string, httpOnly: boolean): void {
-  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+  const secure = IS_PRODUCTION ? '; Secure' : '';
   const httpOnlyFlag = httpOnly ? '; HttpOnly' : '';
   response.append(
     'Set-Cookie',
@@ -252,6 +358,7 @@ function authRateLimit(maxRequests: number, windowMs: number): RequestHandler {
 }
 
 const limitAuthAttempts = authRateLimit(10, 15 * 60 * 1000);
+const limitLoginAttempts = authRateLimit(10, 15 * 60 * 1000);
 
 async function validateAuth(request: express.Request, response: Response): Promise<boolean> {
   const token = readCookie(request, ACCESS_COOKIE);
@@ -439,7 +546,7 @@ app.post('/api/auth/register', limitAuthAttempts, asyncRoute(async (request, res
   response.status(201).json({ user: await db.first(accountQuery, userId) });
 }));
 
-app.post('/api/auth/login', asyncRoute(async (request, response) => {
+app.post('/api/auth/login', limitLoginAttempts, asyncRoute(async (request, response) => {
   const body = requireObject(request.body);
   const email = normalizedEmail(body.email);
   const password = requiredText(body.password, 'Password', 1, 128);
@@ -461,6 +568,12 @@ app.post('/api/auth/login', asyncRoute(async (request, response) => {
     throw new HttpError(401, 'Email or password is incorrect.');
   }
   if (!isWorkshopRole(user.role)) throw new HttpError(403, 'This account has an unsupported role.');
+  const mechanicProfile = await db.first(`
+    SELECT employment_status FROM mechanics WHERE user_id = ? AND workshop_id = ?
+  `, user.id, user.workshop_id) as { employment_status: string } | undefined;
+  if (mechanicProfile && mechanicProfile.employment_status !== 'Active') {
+    throw new HttpError(403, 'This mechanic account is inactive. Contact an administrator.');
+  }
 
   const tokens = await db.transaction(() =>
     issueTokenPair({ id: user.id, workshop_id: user.workshop_id, role: user.role as WorkshopRole })
@@ -476,7 +589,7 @@ app.get('/api/auth/csrf', asyncRoute(async (request, response) => {
   response.json({ csrfToken: token });
 }));
 
-app.get('/api/auth/me', asyncRoute(async (request, response, next) => {
+app.get('/api/auth/me', asyncRoute(async (request, response) => {
   if (!readCookie(request, ACCESS_COOKIE)) {
     if (readCookie(request, REFRESH_COOKIE)) {
       response.status(401).json({ error: 'authentication_required' });
@@ -864,9 +977,7 @@ async function checkReferences(
 }
 
 function requireCustomerStaff(auth: AuthContext): void {
-  if (auth.role !== 'owner' && auth.role !== 'manager' && auth.role !== 'advisor') {
-    throw new HttpError(403, 'role_forbidden');
-  }
+  if (!isStaffRole(auth.role)) throw new HttpError(403, 'role_forbidden');
 }
 
 function normalizedPhone(value: unknown): { phone: string; normalized: string } {
@@ -1653,9 +1764,7 @@ const repairSelect = `
 `;
 
 function requireRepairStaff(auth: AuthContext): void {
-  if (auth.role !== 'owner' && auth.role !== 'manager' && auth.role !== 'advisor') {
-    throw new HttpError(403, 'role_forbidden');
-  }
+  if (!isStaffRole(auth.role)) throw new HttpError(403, 'role_forbidden');
 }
 
 interface DiagnosisCandidate {
@@ -1673,6 +1782,8 @@ interface DiagnosisPrediction {
   library_version?: string;
   generated_at?: string;
   warning: string;
+  data_limitations?: string;
+  context_used?: { fields: string[]; dtc_codes: string[]; note: string };
 }
 
 interface DiagnosisContext {
@@ -1682,13 +1793,14 @@ interface DiagnosisContext {
   recentRepairs: Record<string, unknown>[];
   recentInspections: Record<string, unknown>[];
   note: string;
+  model_context?: Record<string, unknown>;
 }
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === 'string' && entry.trim().length > 0);
 }
 
-function runDiagnosisPrediction(symptoms: string): Promise<DiagnosisPrediction> {
+function runDiagnosisPrediction(symptoms: string, modelContext?: Record<string, unknown>): Promise<DiagnosisPrediction> {
   return new Promise((resolvePrediction, rejectPrediction) => {
     const python = process.env.PYTHON_EXECUTABLE ?? (process.platform === 'win32' ? 'python' : 'python3');
     const child = spawn(python, [resolve(process.cwd(), 'ml', 'diagnosis.py'), 'predict'], {
@@ -1744,7 +1856,7 @@ function runDiagnosisPrediction(symptoms: string): Promise<DiagnosisPrediction> 
         finish(() => rejectPrediction(new HttpError(503, 'The diagnosis model returned an invalid response.')));
       }
     });
-    child.stdin.end(JSON.stringify({ symptoms }));
+    child.stdin.end(JSON.stringify({ symptoms, context: modelContext ?? {} }));
   });
 }
 
@@ -1780,9 +1892,10 @@ async function buildDiagnosisContext(
   symptoms: string,
   auth: AuthContext,
   includeContext: boolean,
-): Promise<{ context: DiagnosisContext; classifierInput: string }> {
+): Promise<{ context: DiagnosisContext; classifierInput: string; modelContext: Record<string, unknown> }> {
   const vehicle = await db.first(`
-    SELECT id, plate AS registration_number, make, model, model_year, mileage, vin, engine_number
+    SELECT id, plate AS registration_number, make, model, model_year, mileage, vin, engine_number,
+      catalogue_model_id, engine_type, engine_capacity_cc, fuel_type, transmission_type, drive_type
     FROM vehicles WHERE id = ? AND workshop_id = ?
   `, vehicleId, auth.workshop_id) as Record<string, unknown> | undefined;
   if (!vehicle) throw new HttpError(404, 'Vehicle not found.');
@@ -1793,9 +1906,42 @@ async function buildDiagnosisContext(
     vehicle,
     recentRepairs: [],
     recentInspections: [],
-    note: 'The classifier uses symptom text. Recorded DTC codes found in workshop notes are appended to that text; other context is saved for the mechanic but does not affect the model score.',
+    note: includeContext
+      ? 'Structured vehicle context and recorded DTC codes are passed to the Python model and saved with the prediction. The Python service appends DTC codes to the symptom text once. The bundled training context is synthetic and has no validated diagnostic signal; output remains unreviewed until a mechanic confirms it.'
+      : 'Vehicle context inclusion was disabled for this request. Only the entered symptom text was sent to the model.',
   };
-  if (!includeContext) return { context, classifierInput: symptoms };
+  const emptyModelContext: Record<string, unknown> = {};
+  if (!includeContext) {
+    context.model_context = emptyModelContext;
+    return { context, classifierInput: symptoms, modelContext: emptyModelContext };
+  }
+
+  let catalogueSpecification: Record<string, unknown> | undefined;
+  const needsCatalogue = ['engine_type', 'fuel_type', 'transmission_type', 'drive_type']
+    .some((field) => vehicle[field] === null || vehicle[field] === undefined || vehicle[field] === '');
+  if (needsCatalogue) {
+    const catalogueModel = vehicle.catalogue_model_id
+      ? await db.first('SELECT id FROM vehicle_models WHERE id = ?', String(vehicle.catalogue_model_id))
+      : await db.first(`
+          SELECT vm.id
+          FROM vehicle_models vm JOIN vehicle_manufacturers m ON m.id = vm.manufacturer_id
+          WHERE LOWER(m.name) = LOWER(?) AND LOWER(vm.name) = LOWER(?)
+          LIMIT 1
+        `, String(vehicle.make ?? ''), String(vehicle.model ?? ''));
+    if (catalogueModel) {
+      catalogueSpecification = await db.first(`
+        SELECT engine_type, engine_capacity_cc, fuel_type, transmission_type, drive_type, verification_status
+        FROM vehicle_specifications
+        WHERE model_id = ? AND verification_status != 'not_recorded'
+        ORDER BY id DESC LIMIT 1
+      `, String((catalogueModel as Record<string, unknown>).id)) as Record<string, unknown> | undefined;
+    }
+  }
+  const contextValue = (field: string): string => {
+    const value = vehicle[field] ?? catalogueSpecification?.[field];
+    if (value === null || value === undefined || value === '') return 'Not recorded';
+    return typeof value === 'string' && value.trim().length === 0 ? 'Not recorded' : String(value);
+  };
 
   const repairs = await db.query(`
     SELECT id, job_no AS repair_job_code, service_type, issue_description,
@@ -1814,12 +1960,34 @@ async function buildDiagnosisContext(
     ...repairs.flatMap((repair) => [repair.issue_description, repair.inspection_notes, repair.notes]),
     ...inspections.map((inspection) => inspection.inspection_notes),
   );
-  let classifierInput = symptoms;
-  if (context.dtcCodes.length) {
-    const suffix = `. Diagnostic codes in workshop records: ${context.dtcCodes.join(', ')}.`;
-    classifierInput = `${symptoms.slice(0, Math.max(1, 2000 - suffix.length))}${suffix}`;
-  }
-  return { context, classifierInput };
+  const joinParts = (parts: unknown[]): string => parts
+    .filter((part) => typeof part === 'string' && part.trim().length > 0)
+    .join(' | ')
+    .slice(0, 300) || 'Not recorded';
+  const engineCapacity = vehicle.engine_capacity_cc ?? catalogueSpecification?.engine_capacity_cc ?? null;
+  const recordedEngine = contextValue('engine_type');
+  const engineDescription = engineCapacity !== null && engineCapacity !== undefined
+    ? `${recordedEngine} (${engineCapacity} cc)`
+    : recordedEngine;
+  const modelContext: Record<string, unknown> = {
+    manufacturer: contextValue('make'),
+    model: contextValue('model'),
+    model_year: vehicle.model_year ?? 0,
+    mileage: vehicle.mileage ?? 0,
+    engine_type: engineDescription,
+    fuel_type: contextValue('fuel_type'),
+    transmission_type: contextValue('transmission_type'),
+    drive_type: contextValue('drive_type'),
+    inspection_findings: joinParts(inspections.map((inspection) => [inspection.condition_status, inspection.inspection_notes].join(': '))),
+    previous_faults: joinParts(repairs.map((repair) => [repair.service_type, repair.issue_description].join(': '))),
+    dtc_codes: context.dtcCodes,
+  };
+  context.model_context = modelContext;
+
+  // The Python service appends extracted DTC codes to the symptom text from
+  // modelContext.dtc_codes. Keeping classifierInput as the mechanic's own text
+  // avoids duplicating those codes in the TF-IDF field.
+  return { context, classifierInput: symptoms, modelContext };
 }
 
 function diagnosisPredictionRows(rows: Record<string, unknown>[]): (Record<string, unknown> & SmartWorkshopPrediction)[] {
@@ -2008,6 +2176,59 @@ async function insertRepairStatusHistory(
   `, randomUUID(), workshopId, jobId, previousStatus, newStatus, note, auth.id, auth.name, changedAt);
 }
 
+// Shared status transition used by Service & Repair, Workshop Floor Live, and mechanic work management.
+// The repair job remains the single source of truth for repair status.
+async function changeRepairStatus(
+  existing: RepairJobRow,
+  nextStatus: RepairStatus,
+  note: string | null,
+  auth: AuthContext,
+  changedAt: string
+): Promise<void> {
+  const previousStatus = existing.repair_status;
+  if (nextStatus === previousStatus) throw new HttpError(400, 'The repair job already has that status.');
+  if (!STATUS_TRANSITIONS[previousStatus].includes(nextStatus)) {
+    throw new HttpError(409, `The status cannot move from ${previousStatus} to ${nextStatus}.`);
+  }
+  if (auth.role === 'technician' && !TECHNICIAN_STATUSES.has(nextStatus)) {
+    throw new HttpError(403, 'Mechanics cannot set this repair status.');
+  }
+  await db.execute(`
+    UPDATE jobs SET repair_status = ?, status = ?, updated_at = ?
+    WHERE id = ? AND workshop_id = ?
+  `, nextStatus, legacyRepairStatus(nextStatus), changedAt, existing.id, auth.workshop_id);
+  await insertRepairStatusHistory(existing.id, auth.workshop_id, previousStatus, nextStatus, note, auth, changedAt);
+}
+
+interface RepairActivityInput {
+  workshopId: string;
+  jobId: string;
+  fields: Record<string, string | null>;
+  activityType?: string | null;
+  workStatus?: string | null;
+  auth: AuthContext;
+  createdAt: string;
+}
+
+// All repair work logs, regardless of which module records them, use this single table.
+async function insertRepairActivity(input: RepairActivityInput): Promise<Record<string, unknown>> {
+  const id = randomUUID();
+  await db.execute(`
+    INSERT INTO repair_activity_logs (
+      id, workshop_id, job_id, work_performed, inspection_findings,
+      problems_identified, recommendations, additional_work_required,
+      internal_notes, activity_type, work_status,
+      created_by_user_id, created_by_name, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, id, input.workshopId, input.jobId,
+    input.fields.work_performed ?? null, input.fields.inspection_findings ?? null,
+    input.fields.problems_identified ?? null, input.fields.recommendations ?? null,
+    input.fields.additional_work_required ?? null, input.fields.internal_notes ?? null,
+    input.activityType ?? null, input.workStatus ?? null,
+    input.auth.id, input.auth.name, input.createdAt);
+  return (await db.first('SELECT * FROM repair_activity_logs WHERE id = ?', id)) as Record<string, unknown>;
+}
+
 async function assignRepairMechanic(
   jobId: string,
   workshopId: string,
@@ -2027,7 +2248,8 @@ async function assignRepairMechanic(
     WHERE job_id = ? AND workshop_id = ? AND unassigned_at IS NULL
   `, jobId, workshopId) as { id: string } | undefined;
   if (previous) {
-    await db.execute('UPDATE repair_mechanic_assignments SET unassigned_at = ? WHERE id = ?', assignedAt, previous.id);
+    await db.execute(`UPDATE repair_mechanic_assignments
+      SET unassigned_at = ?, assignment_status = 'cancelled' WHERE id = ?`, assignedAt, previous.id);
   }
   await db.execute(`
     UPDATE jobs SET assigned_technician = ?, updated_at = ?
@@ -2232,11 +2454,14 @@ app.get('/api/workshop/floor', requireAuth, asyncRoute(async (request, response,
       }));
 
     const bayRows = await db.query(`
+      SELECT code AS name FROM workshop_bays
+      WHERE workshop_id = ? AND is_active = 1
+      UNION
       SELECT DISTINCT TRIM(bay) AS name
       FROM jobs
       WHERE workshop_id = ? AND bay IS NOT NULL AND TRIM(bay) <> ''
       ORDER BY name
-    `, auth.workshop_id) as { name: string }[];
+    `, auth.workshop_id, auth.workshop_id) as { name: string }[];
     const bayOccupants = new Map<string, typeof activeRecords>();
     for (const record of activeRecords) {
       const bay = record.bay?.trim();
@@ -2383,6 +2608,35 @@ app.get('/api/workshop/floor', requireAuth, asyncRoute(async (request, response,
   }
 }));
 
+async function resolveDiagnosisKnowledgeLinks(
+  faultName: string,
+  vehicleId: string,
+  workshopId: string
+): Promise<{ fault_record_id: string | null; catalogue_model_id: string | null }> {
+  const vehicle = await db.first(`
+    SELECT make, model, catalogue_model_id FROM vehicles WHERE id = ? AND workshop_id = ?
+  `, vehicleId, workshopId) as { make: string; model: string; catalogue_model_id: string | null } | undefined;
+  let catalogueModelId = vehicle?.catalogue_model_id ?? null;
+  if (!catalogueModelId && vehicle) {
+    const match = await db.first(`
+      SELECT vm.id
+      FROM vehicle_models vm
+      JOIN vehicle_manufacturers m ON m.id = vm.manufacturer_id
+      WHERE LOWER(m.name) = LOWER(?) AND LOWER(vm.name) = LOWER(?)
+      LIMIT 1
+    `, vehicle.make, vehicle.model) as { id: string } | undefined;
+    catalogueModelId = match?.id ?? null;
+  }
+  const fault = await db.first(`
+    SELECT id FROM vehicle_fault_records
+    WHERE is_active = 1 AND LOWER(fault_name) = LOWER(?)
+      AND (model_id IS NULL OR model_id = ? OR manufacturer_id IS NULL)
+    ORDER BY CASE WHEN model_id = ? THEN 0 WHEN model_id IS NULL THEN 1 ELSE 2 END
+    LIMIT 1
+  `, faultName, catalogueModelId, catalogueModelId) as { id: string } | undefined;
+  return { fault_record_id: fault?.id ?? null, catalogue_model_id: catalogueModelId };
+}
+
 app.post('/api/diagnoses/predict', requireAuth, asyncRoute(async (request, response) => {
   const auth = response.locals.auth as AuthContext;
   const body = requireObject(request.body);
@@ -2404,8 +2658,8 @@ app.post('/api/diagnoses/predict', requireAuth, asyncRoute(async (request, respo
     const job = await db.first('SELECT vehicle_id FROM jobs WHERE id = ? AND workshop_id = ?', jobId, auth.workshop_id) as { vehicle_id: string } | undefined;
     if (!job || job.vehicle_id !== vehicleId) throw new HttpError(400, 'The selected repair job does not belong to this vehicle.');
   }
-  const { context, classifierInput } = await buildDiagnosisContext(vehicleId, symptoms, auth, body.include_context !== false);
-  const result = await runDiagnosisPrediction(classifierInput);
+  const { context, classifierInput, modelContext } = await buildDiagnosisContext(vehicleId, symptoms, auth, body.include_context !== false);
+  const result = await runDiagnosisPrediction(classifierInput, modelContext);
   const best = result.predictions[0];
   if (!best || !Number.isFinite(best.confidence) || best.confidence < 0 || best.confidence > 1) {
     throw new HttpError(503, 'The diagnosis model returned an invalid confidence score.');
@@ -2415,6 +2669,7 @@ app.post('/api/diagnoses/predict', requireAuth, asyncRoute(async (request, respo
     affected_component: componentForFault(candidate.fault_category),
   }));
   const affectedComponent = componentForFault(best.fault_category);
+  const knowledgeLinks = await resolveDiagnosisKnowledgeLinks(best.fault_category, vehicleId, auth.workshop_id);
   const id = randomUUID();
   const createdAt = new Date().toISOString();
   await db.execute(`
@@ -2422,12 +2677,13 @@ app.post('/api/diagnoses/predict', requireAuth, asyncRoute(async (request, respo
       id, workshop_id, customer_id, vehicle_id, job_id, reported_symptoms,
       predicted_fault, confidence, prediction_candidates_json, affected_component,
       model_version, possible_causes_json, recommendations_json, input_context_json,
-      created_by_user_id, created_by_name, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      fault_record_id, catalogue_model_id, created_by_user_id, created_by_name, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `, id, auth.workshop_id, vehicle.customer_id, vehicleId, jobId, symptoms,
     best.fault_category, best.confidence, JSON.stringify(predictions), affectedComponent,
     result.model_version ?? null, JSON.stringify(best.possible_causes ?? []),
-    JSON.stringify(best.inspection_procedures), JSON.stringify(context), auth.id,
+    JSON.stringify(best.inspection_procedures), JSON.stringify(context),
+    knowledgeLinks.fault_record_id, knowledgeLinks.catalogue_model_id, auth.id,
     auth.name, createdAt);
   response.status(201).json({
     diagnosis: {
@@ -2448,9 +2704,13 @@ app.post('/api/diagnoses/predict', requireAuth, asyncRoute(async (request, respo
       model: result.model,
       model_version: result.model_version ?? null,
       library_version: result.library_version ?? null,
+      fault_record_id: knowledgeLinks.fault_record_id,
+      catalogue_model_id: knowledgeLinks.catalogue_model_id,
       generated_at: result.generated_at ?? createdAt,
       context,
+      context_used: result.context_used ?? null,
       warning: result.warning,
+      data_limitations: result.data_limitations ?? null,
     },
   });
 }));
@@ -2463,7 +2723,8 @@ app.get('/api/vehicles/:vehicleId/diagnoses', requireAuth, asyncRoute(async (req
       SELECT id, workshop_id, customer_id, vehicle_id, job_id, reported_symptoms,
         predicted_fault, confidence, prediction_candidates_json, affected_component,
         model_version, possible_causes_json, recommendations_json, input_context_json,
-        review_status, confirmed_fault, mechanic_notes, created_by_name, created_at, reviewed_at
+        fault_record_id, catalogue_model_id, review_status, confirmed_fault, mechanic_notes,
+        created_by_name, created_at, reviewed_at
       FROM ai_diagnoses
       WHERE vehicle_id = ? AND workshop_id = ?
       ORDER BY created_at DESC
@@ -2548,12 +2809,56 @@ app.get('/api/smart-workshop/vehicles/:vehicleId', requireAuth, asyncRoute(async
     await requireDiagnosisVehicleAccess(request.params.vehicleId, auth);
     const vehicle = await db.first(`
       SELECT v.id, v.customer_id, v.vehicle_code, v.plate AS registration_number, v.make, v.model,
-        v.model_year, v.mileage, v.vin, v.engine_number, c.display_name AS customer_name
+        v.model_year, v.mileage, v.vin, v.engine_number, c.display_name AS customer_name,
+        v.catalogue_model_id, v.engine_type, v.engine_capacity_cc, v.fuel_type,
+        v.transmission_type, v.drive_type
       FROM vehicles v LEFT JOIN customers c
         ON c.id = v.customer_id AND c.workshop_id = v.workshop_id
       WHERE v.id = ? AND v.workshop_id = ?
-    `, request.params.vehicleId, auth.workshop_id);
+    `, request.params.vehicleId, auth.workshop_id) as Record<string, unknown> | undefined;
     if (!vehicle) throw new HttpError(404, 'Vehicle not found.');
+
+    // Catalogue linkage is looked up, never silently invented. An unlinked
+    // vehicle keeps its registered make/model and reports missing specifications.
+    let catalogueModel = vehicle.catalogue_model_id
+      ? await db.first(`
+          SELECT vm.id, vm.name, vm.body_style, vm.asset_key, vm.asset_status, vm.specification_note,
+            m.name AS manufacturer_name
+          FROM vehicle_models vm JOIN vehicle_manufacturers m ON m.id = vm.manufacturer_id
+          WHERE vm.id = ?
+        `, String(vehicle.catalogue_model_id))
+      : undefined;
+    if (!catalogueModel) {
+      catalogueModel = await db.first(`
+        SELECT vm.id, vm.name, vm.body_style, vm.asset_key, vm.asset_status, vm.specification_note,
+          m.name AS manufacturer_name
+        FROM vehicle_models vm JOIN vehicle_manufacturers m ON m.id = vm.manufacturer_id
+        WHERE LOWER(m.name) = LOWER(?) AND LOWER(vm.name) = LOWER(?)
+        LIMIT 1
+      `, String(vehicle.make), String(vehicle.model));
+    }
+    const modelAsset = catalogueModel?.asset_key
+      ? await db.first('SELECT * FROM vehicle_3d_assets WHERE asset_key = ?', String(catalogueModel.asset_key))
+      : undefined;
+    const catalogueSpecification = catalogueModel
+      ? await db.first(`
+          SELECT engine_type, engine_capacity_cc, fuel_type, transmission_type, drive_type,
+            data_source, verification_status
+          FROM vehicle_specifications
+          WHERE model_id = ? AND verification_status != 'not_recorded'
+          ORDER BY id DESC LIMIT 1
+        `, String(catalogueModel.id))
+      : undefined;
+    const specificationFields: { label: string; value: unknown }[] = [
+      { label: 'Engine type', value: vehicle.engine_type ?? catalogueSpecification?.engine_type },
+      { label: 'Engine capacity', value: vehicle.engine_capacity_cc ?? catalogueSpecification?.engine_capacity_cc },
+      { label: 'Fuel type', value: vehicle.fuel_type ?? catalogueSpecification?.fuel_type },
+      { label: 'Transmission', value: vehicle.transmission_type ?? catalogueSpecification?.transmission_type },
+      { label: 'Drive type', value: vehicle.drive_type ?? catalogueSpecification?.drive_type },
+    ];
+    const missingSpecifications = specificationFields
+      .filter((field) => field.value === null || field.value === undefined || field.value === '')
+      .map((field) => field.label);
 
     const inspectionRows = await db.query(`
       SELECT id, component_name, condition_status, inspection_notes, inspection_date,
@@ -2593,9 +2898,21 @@ app.get('/api/smart-workshop/vehicles/:vehicleId', requireAuth, asyncRoute(async
       };
     });
     const repairs = await db.query(`
-      SELECT id, job_no AS repair_job_code, service_type, repair_status, issue_description, created_at
+      SELECT id, job_no AS repair_job_code, service_type, repair_status, issue_description,
+        assigned_technician, created_at
       FROM jobs WHERE vehicle_id = ? AND workshop_id = ?
       ORDER BY created_at DESC LIMIT 10
+    `, request.params.vehicleId, auth.workshop_id);
+    // The mechanic responsible for this vehicle comes from the existing repair assignment.
+    const activeAssignment = await db.first(`
+      SELECT j.id AS job_id, j.job_no AS repair_job_code, j.repair_status, j.service_type,
+        u.id AS user_id, u.name AS user_name,
+        m.id AS mechanic_id, m.mechanic_number, m.full_name AS mechanic_name, m.specialization
+      FROM jobs j
+      LEFT JOIN users u ON u.id = j.assigned_technician AND u.workshop_id = j.workshop_id
+      LEFT JOIN mechanics m ON m.user_id = u.id AND m.workshop_id = j.workshop_id
+      WHERE j.vehicle_id = ? AND j.workshop_id = ? AND j.assigned_technician IS NOT NULL
+      ORDER BY j.created_at DESC LIMIT 1
     `, request.params.vehicleId, auth.workshop_id);
     response.json({
       vehicle,
@@ -2605,6 +2922,14 @@ app.get('/api/smart-workshop/vehicles/:vehicleId', requireAuth, asyncRoute(async
       inspections: inspectionRows,
       diagnoses: predictions,
       repairs,
+      active_assignment: activeAssignment ?? null,
+      catalogue_model: catalogueModel ?? null,
+      model_asset: modelAsset ?? null,
+      specifications: {
+        fields: specificationFields,
+        missing: missingSpecifications,
+        note: 'Missing specifications are not inferred. Add verified details from the vehicle service book or manufacturer data.',
+      },
       generated_at: new Date().toISOString(),
     });
   } catch (error) {
@@ -2922,19 +3247,13 @@ app.post('/api/repairs/:id/activities', requireAuth, asyncRoute(async (request, 
     if (Object.values(fields).every((value) => value === null)) {
       throw new HttpError(400, 'Enter at least one repair activity detail.');
     }
-    const id = randomUUID();
-    const createdAt = new Date().toISOString();
-    await db.execute(`
-      INSERT INTO repair_activity_logs (
-        id, workshop_id, job_id, work_performed, inspection_findings,
-        problems_identified, recommendations, additional_work_required,
-        internal_notes, created_by_user_id, created_by_name, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, id, auth.workshop_id, request.params.id,
-      fields.work_performed, fields.inspection_findings, fields.problems_identified,
-      fields.recommendations, fields.additional_work_required, fields.internal_notes,
-      auth.id, auth.name, createdAt);
-    const record = await db.first('SELECT * FROM repair_activity_logs WHERE id = ?', id);
+    const record = await insertRepairActivity({
+      workshopId: auth.workshop_id,
+      jobId: request.params.id,
+      fields,
+      auth,
+      createdAt: new Date().toISOString(),
+    });
     response.status(201).json({ record });
   } catch (error) {
     next(error);
@@ -2977,28 +3296,12 @@ app.patch('/api/repairs/:id/status', requireAuth, asyncRoute(async (request, res
     }
     const nextStatus = body.status;
     if (!isRepairStatus(nextStatus)) throw new HttpError(400, 'Repair status is invalid.');
-    const previousStatus = existing.repair_status;
-    if (nextStatus === previousStatus) throw new HttpError(400, 'The repair job already has that status.');
-    if (!STATUS_TRANSITIONS[previousStatus].includes(nextStatus)) {
-      throw new HttpError(409, `The status cannot move from ${previousStatus} to ${nextStatus}.`);
-    }
-    if (auth.role === 'technician' && !TECHNICIAN_STATUSES.has(nextStatus)) {
-      throw new HttpError(403, 'Mechanics cannot set this repair status.');
-    }
     const note = body.note === undefined ? null : optionalCustomerText(body.note, 'Update note', 2000);
     const now = new Date().toISOString();
 
     await db.transaction(async () => {
-      await db.execute(`
-        UPDATE jobs
-        SET repair_status = ?, status = ?, updated_at = ?
-        WHERE id = ? AND workshop_id = ?
-      `, nextStatus, legacyRepairStatus(nextStatus), now, request.params.id, auth.workshop_id);
-      await insertRepairStatusHistory(
-        request.params.id, auth.workshop_id, previousStatus, nextStatus, note, auth, now
-      );
-
-  });
+      await changeRepairStatus(existing, nextStatus, note, auth, now);
+    });
 
     response.json({ record: await repairJob(request.params.id, auth.workshop_id, auth.role === 'technician' ? auth : undefined) });
   } catch (error) {
@@ -3065,9 +3368,7 @@ app.put('/api/repairs/:id', requireAuth, asyncRoute(async (request, response, ne
 }));
 
 function requireInventoryManager(auth: AuthContext): void {
-  if (auth.role !== 'owner' && auth.role !== 'manager' && auth.role !== 'advisor') {
-    throw new HttpError(403, 'role_forbidden');
-  }
+  if (!isStaffRole(auth.role)) throw new HttpError(403, 'role_forbidden');
 }
 
 function inventoryText(value: unknown, label: string, maxLength: number, nullable = false): string | null {
@@ -3420,38 +3721,46 @@ app.get('/api/repairs/:id/parts', requireAuth, asyncRoute(async (request, respon
   } catch (error) { next(error); }
 }));
 
+// Shared parts-issue operation used by Service & Repair and the mechanic workspace.
+// Inventory is updated only through the existing stock transaction mechanism.
+async function issueRepairPart(
+  job: RepairJobRow,
+  body: Record<string, unknown>,
+  auth: AuthContext
+): Promise<Record<string, unknown>[]> {
+  if (Object.keys(body).some((field) => !['part_id', 'quantity', 'note'].includes(field))) {
+    throw new HttpError(400, 'Only part, quantity, and note can be provided.');
+  }
+  const partId = requiredText(body.part_id, 'Part', 1, 36);
+  const quantity = inventoryInteger(body.quantity, 'Quantity', 1);
+  const note = inventoryText(body.note, 'Note', 500, true);
+  const now = new Date().toISOString();
+
+  await db.transaction(async () => {
+    const part = await db.first('SELECT quantity, selling_price_cents FROM parts WHERE id = ? AND workshop_id = ?', partId, auth.workshop_id) as { quantity: number; selling_price_cents: number } | undefined;
+    if (!part) throw new HttpError(404, 'Part not found.');
+    const changed = await db.execute('UPDATE parts SET quantity = quantity - ?, updated_at = ? WHERE id = ? AND workshop_id = ? AND quantity >= ?', quantity, now, partId, auth.workshop_id, quantity);
+    if (changed.affectedRows === 0) throw new HttpError(409, 'Insufficient stock. Reduce the quantity or receive more stock first.');
+    await db.execute(`INSERT INTO job_parts (id, workshop_id, job_id, part_id, quantity, unit_price_cents, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE quantity = quantity + VALUES(quantity),
+        unit_price_cents = VALUES(unit_price_cents), updated_at = VALUES(updated_at)`, randomUUID(), auth.workshop_id, job.id, partId, quantity, part.selling_price_cents, now, now);
+    await insertStockTransaction({ workshopId: auth.workshop_id, partId, jobId: job.id,
+      vehicleId: job.vehicle_id, type: 'repair_issue', delta: -quantity,
+      unitCostCents: part.selling_price_cents, note, auth, transactionAt: now });
+  });
+
+  return await db.query(`SELECT jp.id, jp.part_id, jp.quantity, jp.unit_price_cents,
+    p.name AS part_name, p.sku AS part_number FROM job_parts jp
+    JOIN parts p ON p.id = jp.part_id AND p.workshop_id = jp.workshop_id
+    WHERE jp.job_id = ? AND jp.workshop_id = ?`, job.id, auth.workshop_id);
+}
+
 app.post('/api/repairs/:id/parts', requireAuth, asyncRoute(async (request, response, next) => {
   try {
     const auth = response.locals.auth as AuthContext;
     const job = await requireRepairAccess(request.params.id, auth);
-    const body = requireObject(request.body);
-    if (Object.keys(body).some((field) => !['part_id', 'quantity', 'note'].includes(field))) {
-      throw new HttpError(400, 'Only part, quantity, and note can be provided.');
-    }
-    const partId = requiredText(body.part_id, 'Part', 1, 36);
-    const quantity = inventoryInteger(body.quantity, 'Quantity', 1);
-    const note = inventoryText(body.note, 'Note', 500, true);
-    const now = new Date().toISOString();
-
-    await db.transaction(async () => {
-      const part = await db.first('SELECT quantity, selling_price_cents FROM parts WHERE id = ? AND workshop_id = ?', partId, auth.workshop_id) as { quantity: number; selling_price_cents: number } | undefined;
-      if (!part) throw new HttpError(404, 'Part not found.');
-      const changed = await db.execute('UPDATE parts SET quantity = quantity - ?, updated_at = ? WHERE id = ? AND workshop_id = ? AND quantity >= ?', quantity, now, partId, auth.workshop_id, quantity);
-      if (changed.affectedRows === 0) throw new HttpError(409, 'Insufficient stock. Reduce the quantity or receive more stock first.');
-      await db.execute(`INSERT INTO job_parts (id, workshop_id, job_id, part_id, quantity, unit_price_cents, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON DUPLICATE KEY UPDATE quantity = quantity + VALUES(quantity),
-          unit_price_cents = VALUES(unit_price_cents), updated_at = VALUES(updated_at)`, randomUUID(), auth.workshop_id, request.params.id, partId, quantity, part.selling_price_cents, now, now);
-      await insertStockTransaction({ workshopId: auth.workshop_id, partId, jobId: job.id,
-        vehicleId: job.vehicle_id, type: 'repair_issue', delta: -quantity,
-        unitCostCents: part.selling_price_cents, note, auth, transactionAt: now });
-
-  });
-
-    const records = await db.query(`SELECT jp.id, jp.part_id, jp.quantity, jp.unit_price_cents,
-      p.name AS part_name, p.sku AS part_number FROM job_parts jp
-      JOIN parts p ON p.id = jp.part_id AND p.workshop_id = jp.workshop_id
-      WHERE jp.job_id = ? AND jp.workshop_id = ?`, request.params.id, auth.workshop_id);
+    const records = await issueRepairPart(job, requireObject(request.body), auth);
     response.status(201).json({ records });
   } catch (error) { next(error); }
 }));
@@ -3653,6 +3962,48 @@ app.get('/api/inventory/reports/:reportType', requireAuth, asyncRoute(async (req
   document.end();
 }));
 
+// Mechanic Management extends this server and reuses its auth, CSRF, repair workflow,
+// activity logging, assignment history, and inventory transaction helpers.
+// Registered before the generic /api/:resource routes so mechanic paths are not shadowed.
+registerSmartWorkshopCatalogueRoutes({
+  app,
+  db,
+  HttpError,
+  requireAuth,
+  asyncRoute,
+  requireObject,
+  requiredText,
+  requireVehicleAccess: (vehicleId, auth) => requireDiagnosisVehicleAccess(vehicleId, auth as AuthContext),
+});
+
+registerMechanicRoutes({
+  app,
+  db,
+  HttpError,
+  requireAuth,
+  asyncRoute,
+  requireObject,
+  requiredText,
+  normalizedEmail,
+  derivePassword,
+  validDate,
+  assignRepairMechanic,
+  changeRepairStatus: (job, status, note, auth, at) => changeRepairStatus(
+    job as Parameters<typeof changeRepairStatus>[0],
+    status as Parameters<typeof changeRepairStatus>[1],
+    note,
+    auth,
+    at
+  ),
+  insertRepairActivity,
+  issueRepairPart: (job, body, auth) => issueRepairPart(job as Parameters<typeof issueRepairPart>[0], body, auth),
+  repairJob: (id, workshopId, technician) => repairJob(id, workshopId, technician as AuthContext | undefined),
+  repairSelect,
+  isRepairStatus,
+  statusTransitions: STATUS_TRANSITIONS,
+  technicianStatuses: TECHNICIAN_STATUSES,
+});
+
 app.get('/api/:resource', requireAuth, authorizeResource('read'), asyncRoute(async (request, response, next) => {
   try {
     const auth = response.locals.auth as AuthContext;
@@ -3845,35 +4196,47 @@ app.post('/api/customer/auth/register', limitAuthAttempts, asyncRoute(async (req
   const body = requireObject(request.body);
   const email = normalizedEmail(body.email);
   const password = requiredText(body.password, 'Password', 8, 128);
-  const customer = await db.first('SELECT id, workshop_id, display_name, email FROM customers WHERE lower(email) = ?', email) as {
+  const phone = normalizedPhone(body.phone ?? body.phone_number);
+
+  const customer = await db.first(`
+    SELECT id, workshop_id, display_name, email, phone_normalized
+    FROM customers WHERE lower(email) = ?
+  `, email) as {
     id: string;
     workshop_id: string;
     display_name: string;
     email: string;
+    phone_normalized: string | null;
   } | undefined;
-  if (!customer) throw new HttpError(404, 'No matching customer record found. Please contact the workshop.');
+
+  // Proof of registration details: email alone is not sufficient to claim a customer record.
+  if (!customer || customer.phone_normalized !== phone.normalized) {
+    throw new HttpError(401, 'The email and registered phone number do not match a customer record.');
+  }
   const existing = await db.first('SELECT id FROM customer_accounts WHERE customer_id = ? AND workshop_id = ?', customer.id, customer.workshop_id);
   if (existing) throw new HttpError(409, 'An account already exists for this customer. Please sign in.');
 
+  const csrf = readCookie(request, CSRF_COOKIE);
+  if (!csrf || !/^[a-f0-9]{64}$/.test(csrf)) throw new HttpError(403, 'csrf_validation_failed');
+
   const salt = randomBytes(16);
   const passwordHash = await derivePassword(password, salt);
-  const now = new Date().toISOString();
+  const now = sessionClockNow();
   const accountId = randomUUID();
   await db.execute(`
     INSERT INTO customer_accounts (id, customer_id, workshop_id, email, password_hash, password_salt, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `, accountId, customer.id, customer.workshop_id, email, passwordHash.toString('hex'), salt.toString('hex'), now, now);
 
-  const csrf = readCookie(request, CSRF_COOKIE);
-  if (!csrf) throw new HttpError(403, 'csrf_validation_failed');
-  const identity = { sub: customer.id, wid: customer.workshop_id, role: 'customer' as const, sid: accountId, csrf };
-  const accessClaims = createClaims(identity, 'access');
-  const refreshClaims = createClaims(identity, 'refresh');
-  setCustomerAuthCookies(response, signJwt(accessClaims), signJwt(refreshClaims), csrf);
+  const tokens = await createCustomerSession(
+    { id: accountId, customer_id: customer.id, workshop_id: customer.workshop_id },
+    csrf
+  );
+  setCustomerAuthCookies(response, tokens.accessToken, tokens.refreshToken, csrf);
   response.status(201).json({ customer: { id: customer.id, display_name: customer.display_name, email: customer.email } });
 }));
 
-app.post('/api/customer/auth/login', asyncRoute(async (request, response) => {
+app.post('/api/customer/auth/login', limitLoginAttempts, asyncRoute(async (request, response) => {
   const body = requireObject(request.body);
   const email = normalizedEmail(body.email);
   const password = requiredText(body.password, 'Password', 1, 128);
@@ -3893,15 +4256,111 @@ app.post('/api/customer/auth/login', asyncRoute(async (request, response) => {
   }
 
   const csrf = readCookie(request, CSRF_COOKIE);
-  if (!csrf) throw new HttpError(403, 'csrf_validation_failed');
-  const identity = { sub: account.customer_id, wid: account.workshop_id, role: 'customer' as const, sid: account.id, csrf };
-  const accessClaims = createClaims(identity, 'access');
-  const refreshClaims = createClaims(identity, 'refresh');
-  setCustomerAuthCookies(response, signJwt(accessClaims), signJwt(refreshClaims), csrf);
+  if (!csrf || !/^[a-f0-9]{64}$/.test(csrf)) throw new HttpError(403, 'csrf_validation_failed');
+  const tokens = await createCustomerSession(
+    { id: account.id, customer_id: account.customer_id, workshop_id: account.workshop_id },
+    csrf
+  );
+  setCustomerAuthCookies(response, tokens.accessToken, tokens.refreshToken, csrf);
   response.json({ customer: { id: account.customer_id, email: account.email } });
 }));
 
-app.post('/api/customer/auth/logout', requireCustomerAuth, asyncRoute(async (request, response) => {
+app.post('/api/customer/auth/refresh', limitAuthAttempts, asyncRoute(async (request, response) => {
+  const token = readCookie(request, CUSTOMER_REFRESH_COOKIE);
+  if (!token) {
+    clearCustomerAuthCookies(response);
+    response.status(401).json({ error: 'refresh_token_required' });
+    return;
+  }
+
+  let claims: JwtClaims;
+  try {
+    claims = verifyJwt(token, 'refresh');
+  } catch (error) {
+    clearCustomerAuthCookies(response);
+    response.status(401).json({ error: error instanceof JwtError && error.code === 'expired' ? 'refresh_token_expired' : 'refresh_token_invalid' });
+    return;
+  }
+
+  const csrfCookie = readCookie(request, CSRF_COOKIE);
+  if (!isCustomerRole(claims.role) || !csrfCookie || !constantTimeMatch(csrfCookie, claims.csrf)) {
+    clearCustomerAuthCookies(response);
+    response.status(401).json({ error: 'refresh_token_invalid' });
+    return;
+  }
+
+  const tokenRow = await db.first(`
+    SELECT tok.jti, tok.session_id, tok.revoked_at, tok.replaced_by_jti,
+           cs.revoked_at AS session_revoked_at, cs.absolute_expires_at,
+           ca.id AS account_id, ca.customer_id, ca.workshop_id, ca.updated_at
+    FROM customer_jwt_tokens tok
+    JOIN customer_sessions cs ON cs.id = tok.session_id
+    JOIN customer_accounts ca ON ca.id = cs.customer_account_id
+    WHERE tok.jti = ? AND tok.token_type = 'refresh'
+      AND ca.id = ? AND ca.customer_id = ? AND ca.workshop_id = ?
+  `, claims.jti, claims.sid, claims.sub, claims.wid) as {
+    jti: string;
+    session_id: string;
+    revoked_at: string | null;
+    replaced_by_jti: string | null;
+    session_revoked_at: string | null;
+    absolute_expires_at: string;
+    account_id: string;
+    customer_id: string;
+    workshop_id: string;
+    updated_at: string;
+  } | undefined;
+
+  const absoluteExpiry = tokenRow ? new Date(tokenRow.absolute_expires_at).getTime() : Number.NaN;
+  const accountUpdated = tokenRow ? new Date(tokenRow.updated_at).getTime() : Number.NaN;
+  const invalid =
+    !tokenRow ||
+    tokenRow.revoked_at !== null ||
+    tokenRow.session_revoked_at !== null ||
+    (Number.isFinite(absoluteExpiry) && absoluteExpiry <= Date.now()) ||
+    (Number.isFinite(accountUpdated) && claims.iat * 1000 < accountUpdated);
+
+  if (invalid) {
+    // Reuse of an already-rotated refresh token revokes the whole session family.
+    if (tokenRow?.revoked_at) await revokeCustomerSession(tokenRow.session_id);
+    clearCustomerAuthCookies(response);
+    response.status(401).json({ error: 'refresh_token_revoked' });
+    return;
+  }
+
+  const csrf = createCsrfToken();
+  const absoluteSeconds = Math.floor(new Date(tokenRow.absolute_expires_at).getTime() / 1000);
+  const pair = await db.transaction(async () => {
+    const issued = await issueCustomerTokenPair(
+      tokenRow.session_id,
+      { id: tokenRow.account_id, customer_id: tokenRow.customer_id, workshop_id: tokenRow.workshop_id },
+      csrf,
+      absoluteSeconds
+    );
+    await revokeCustomerToken(claims.jti, issued.refreshJti);
+    return issued;
+  });
+  setCustomerAuthCookies(response, pair.accessToken, pair.refreshToken, csrf);
+  response.json({ refreshed: true });
+}));
+
+app.post('/api/customer/auth/logout', asyncRoute(async (request, response) => {
+  for (const [cookie, type] of [
+    [CUSTOMER_ACCESS_COOKIE, 'access'],
+    [CUSTOMER_REFRESH_COOKIE, 'refresh'],
+  ] as const) {
+    const token = readCookie(request, cookie);
+    if (!token) continue;
+    try {
+      const claims = verifyJwt(token, type);
+      if (!isCustomerRole(claims.role)) continue;
+      const row = await db.first('SELECT session_id FROM customer_jwt_tokens WHERE jti = ? AND token_type = ?', claims.jti, type) as { session_id: string } | undefined;
+      if (row) await revokeCustomerSession(row.session_id);
+      break;
+    } catch (error) {
+      if (!(error instanceof JwtError)) throw error;
+    }
+  }
   clearCustomerAuthCookies(response);
   response.status(204).end();
 }));
@@ -3927,10 +4386,14 @@ app.get('/api/customer/vehicles/:vehicleId/jobs', requireCustomerAuth, asyncRout
     const vehicle = await db.first('SELECT id FROM vehicles WHERE id = ? AND customer_id = ? AND workshop_id = ?', request.params.vehicleId, customer.customer_id, customer.workshop_id);
     if (!vehicle) throw new HttpError(404, 'Vehicle not found.');
     const jobs = await db.query(`
-      SELECT id, job_no, service_type, issue_description, status, repair_status, repair_priority, promised_at, created_at, updated_at
-      FROM jobs
-      WHERE vehicle_id = ? AND workshop_id = ?
-      ORDER BY created_at DESC
+      SELECT j.id, j.job_no, j.service_type, j.issue_description, j.status, j.repair_status,
+        j.repair_priority, j.promised_at, j.created_at, j.updated_at,
+        m.full_name AS assigned_mechanic_name, m.specialization AS assigned_mechanic_specialization
+      FROM jobs j
+      LEFT JOIN users u ON u.id = j.assigned_technician AND u.workshop_id = j.workshop_id
+      LEFT JOIN mechanics m ON m.user_id = u.id AND m.workshop_id = j.workshop_id
+      WHERE j.vehicle_id = ? AND j.workshop_id = ?
+      ORDER BY j.created_at DESC
     `, request.params.vehicleId, customer.workshop_id);
     response.json({ jobs });
   } catch (error) {
@@ -3963,10 +4426,14 @@ app.get('/api/customer/vehicles/:vehicleId/service-history', requireCustomerAuth
     const vehicle = await db.first('SELECT id FROM vehicles WHERE id = ? AND customer_id = ? AND workshop_id = ?', request.params.vehicleId, customer.customer_id, customer.workshop_id);
     if (!vehicle) throw new HttpError(404, 'Vehicle not found.');
     const serviceHistory = await db.query(`
-      SELECT id, job_no, service_type, status, repair_status, created_at, updated_at, promised_at
-      FROM jobs
-      WHERE vehicle_id = ? AND workshop_id = ?
-      ORDER BY created_at DESC
+      SELECT j.id, j.job_no, j.service_type, j.status, j.repair_status,
+        j.created_at, j.updated_at, j.promised_at,
+        m.full_name AS assigned_mechanic_name
+      FROM jobs j
+      LEFT JOIN users u ON u.id = j.assigned_technician AND u.workshop_id = j.workshop_id
+      LEFT JOIN mechanics m ON m.user_id = u.id AND m.workshop_id = j.workshop_id
+      WHERE j.vehicle_id = ? AND j.workshop_id = ?
+      ORDER BY j.created_at DESC
     `, request.params.vehicleId, customer.workshop_id);
     response.json({ service_history: serviceHistory });
   } catch (error) {
@@ -3974,12 +4441,602 @@ app.get('/api/customer/vehicles/:vehicleId/service-history', requireCustomerAuth
   }
 }));
 
+/* -------------------------------------------------------------------------- */
+/* Adaptive learning, workshop intelligence, twin and visual localisation APIs  */
+/* -------------------------------------------------------------------------- */
+
+function requireIntelligenceStaff(auth: AuthContext): void {
+  if (!isStaffRole(auth.role)) throw new HttpError(403, 'role_forbidden');
+}
+
+function queryText(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+app.post('/api/ai/retrain', requireAuth, asyncRoute(async (request, response, next) => {
+  try {
+    const auth = response.locals.auth as AuthContext;
+    requireIntelligenceStaff(auth);
+    const mixedDataset = resolve(process.cwd(), 'ml', 'data', 'vehicle_fault_training_mixed.csv');
+    const dataset = existsSync(mixedDataset)
+      ? mixedDataset
+      : resolve(process.cwd(), 'ml', 'data', 'vehicle_fault_training.csv');
+    const runId = randomUUID();
+    const startedAt = sessionClockNow();
+    await db.execute(`
+      INSERT INTO ai_training_runs (
+        id, workshop_id, initiated_by_user_id, initiated_by_name, dataset_path,
+        status, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `, runId, auth.workshop_id, auth.id, auth.name, dataset, 'running', startedAt);
+
+    const python = process.env.PYTHON_EXECUTABLE ?? (process.platform === 'win32' ? 'python' : 'python3');
+    const child = spawn(python, [
+      resolve(process.cwd(), 'ml', 'diagnosis.py'), 'retrain', '--dataset', dataset,
+    ], { cwd: process.cwd(), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => { stdout += chunk.slice(0, 1_000_000); });
+    child.stderr.on('data', (chunk: string) => { stderr = (stderr + chunk).slice(-8_000); });
+
+    const outcome = await new Promise<{ code: number | null; error?: string }>((resolveRun) => {
+      const timer = setTimeout(() => child.kill(), 180_000);
+      child.on('error', (error) => {
+        clearTimeout(timer);
+        resolveRun({ code: null, error: error.message });
+      });
+      child.on('close', (code) => {
+        clearTimeout(timer);
+        resolveRun({ code });
+      });
+    });
+
+    let result: Record<string, unknown> = {};
+    try {
+      const jsonLine = stdout.split(/\r?\n/).reverse().find((line) => line.trim().startsWith('{'));
+      if (jsonLine) result = JSON.parse(jsonLine) as Record<string, unknown>;
+    } catch {
+      result = { raw_output: stdout.slice(0, 2000) };
+    }
+    const finishedAt = sessionClockNow();
+    const status = outcome.code === 0 && !outcome.error ? 'succeeded' : 'failed';
+    const message = status === 'failed' ? ((outcome.error ?? stderr.trim()) || `Python exited with ${outcome.code}`) : null;
+    await db.execute(`
+      UPDATE ai_training_runs
+      SET status = ?, model_version = ?, provenance_json = ?, metrics_json = ?, error_text = ?, finished_at = ?
+      WHERE id = ?
+    `, status, typeof result.model_version === 'string' ? result.model_version : null,
+      JSON.stringify(result.provenance_counts ?? result.provenance ?? null),
+      JSON.stringify(result.evaluation ?? null), message, finishedAt, runId);
+    if (status === 'failed') throw new HttpError(502, `Model retraining failed: ${message}`);
+    response.json({ run: { id: runId, status, model_version: result.model_version ?? null, dataset: dataset }, result });
+  } catch (error) {
+    next(error);
+  }
+}));
+
+app.get('/api/ai/training-runs', requireAuth, asyncRoute(async (request, response, next) => {
+  try {
+    const auth = response.locals.auth as AuthContext;
+    requireIntelligenceStaff(auth);
+    const runs = await db.query(`
+      SELECT id, dataset_path, status, model_version, provenance_json, metrics_json,
+             error_text, initiated_by_name, created_at, finished_at
+      FROM ai_training_runs WHERE workshop_id = ? ORDER BY created_at DESC LIMIT 25
+    `, auth.workshop_id);
+    response.json({ runs });
+  } catch (error) {
+    next(error);
+  }
+}));
+
+app.get('/api/workshop/bays', requireAuth, asyncRoute(async (request, response, next) => {
+  try {
+    const auth = response.locals.auth as AuthContext;
+    const bays = await db.query(`
+      SELECT id, code, label, is_active FROM workshop_bays
+      WHERE workshop_id = ? ORDER BY code
+    `, auth.workshop_id);
+    response.json({ bays });
+  } catch (error) { next(error); }
+}));
+
+app.post('/api/workshop/bays', requireAuth, asyncRoute(async (request, response, next) => {
+  try {
+    const auth = response.locals.auth as AuthContext;
+    requireIntelligenceStaff(auth);
+    const body = requireObject(request.body);
+    const code = requiredText(body.code, 'Bay code', 1, 80);
+    const label = body.label === undefined ? null : requiredText(body.label, 'Bay label', 1, 160);
+    const id = randomUUID();
+    const now = sessionClockNow();
+    await db.execute(`
+      INSERT INTO workshop_bays (id, workshop_id, code, label, is_active, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 1, ?, ?)
+    `, id, auth.workshop_id, code, label, now, now);
+    response.status(201).json({ bay: { id, code, label, is_active: true } });
+  } catch (error) { next(error); }
+}));
+
+app.delete('/api/workshop/bays/:id', requireAuth, asyncRoute(async (request, response, next) => {
+  try {
+    const auth = response.locals.auth as AuthContext;
+    requireIntelligenceStaff(auth);
+    const result = await db.execute('DELETE FROM workshop_bays WHERE id = ? AND workshop_id = ?', request.params.id, auth.workshop_id);
+    if (result.affectedRows === 0) throw new HttpError(404, 'Bay not found.');
+    response.status(204).end();
+  } catch (error) { next(error); }
+}));
+
+async function partsRecommendationContext(vehicleId: string, auth: AuthContext) {
+  await requireDiagnosisVehicleAccess(vehicleId, auth);
+  const vehicle = await db.first(`
+    SELECT id, customer_id, workshop_id, make, model, catalogue_model_id
+    FROM vehicles WHERE id = ? AND workshop_id = ?
+  `, vehicleId, auth.workshop_id) as {
+    id: string; customer_id: string; workshop_id: string; make: string; model: string; catalogue_model_id: string | null;
+  } | undefined;
+  if (!vehicle) throw new HttpError(404, 'Vehicle not found.');
+  const diagnosis = await db.first(`
+    SELECT id, predicted_fault, confirmed_fault, review_status, affected_component
+    FROM ai_diagnoses
+    WHERE vehicle_id = ? AND workshop_id = ? AND review_status IN ('confirmed', 'corrected')
+    ORDER BY created_at DESC LIMIT 1
+  `, vehicleId, auth.workshop_id) as {
+    id: string; predicted_fault: string; confirmed_fault: string | null; review_status: string; affected_component: string | null;
+  } | undefined;
+  return { vehicle, diagnosis };
+}
+
+app.post('/api/intelligence/parts/recommend', requireAuth, asyncRoute(async (request, response, next) => {
+  try {
+    const auth = response.locals.auth as AuthContext;
+    requireIntelligenceStaff(auth);
+    const body = requireObject(request.body);
+    const vehicleId = requiredText(body.vehicle_id, 'Vehicle', 1, 36);
+    const jobId = queryText(body.job_id) || null;
+    const { vehicle, diagnosis } = await partsRecommendationContext(vehicleId, auth);
+    const catalogueModelId = vehicle.catalogue_model_id ?? null;
+    const componentKey = diagnosis?.affected_component ?? null;
+    const faultName = diagnosis?.confirmed_fault ?? diagnosis?.predicted_fault ?? '';
+
+    let relevant = await db.query(`
+      SELECT p.id, p.sku, p.name, p.category, p.quantity, p.reorder_level, p.selling_price_cents,
+             pc.component_key, pc.source AS compatibility_source
+      FROM part_compatibility pc
+      JOIN parts p ON p.id = pc.part_id AND p.workshop_id = ?
+      WHERE pc.catalogue_model_id = ? AND (? IS NULL OR pc.component_key = ?)
+    `, auth.workshop_id, catalogueModelId, componentKey, componentKey) as Record<string, unknown>[];
+    if (relevant.length === 0 && componentKey) {
+      relevant = await db.query(`
+        SELECT id, sku, name, category, quantity, reorder_level, selling_price_cents,
+               NULL AS component_key, 'component_keyword' AS compatibility_source
+        FROM parts WHERE workshop_id = ? AND LOWER(category) = LOWER(?)
+      `, auth.workshop_id, componentKey) as Record<string, unknown>[];
+    }
+
+    const recommendations = [];
+    for (const part of relevant) {
+      const inStock = Number(part.quantity) > 0;
+      const score = Number((0.55 + (inStock ? 0.3 : 0) + (Number(part.quantity) > Number(part.reorder_level) ? 0.15 : 0)).toFixed(3));
+      const reason = {
+        fault: faultName || 'No confirmed diagnosis',
+        component_key: componentKey,
+        compatibility_source: part.compatibility_source,
+        stock: Number(part.quantity),
+        advisory_only: true,
+      };
+      const id = randomUUID();
+      await db.execute(`
+        INSERT INTO part_recommendations (
+          id, workshop_id, vehicle_id, job_id, diagnosis_id, part_id, score, reason_json,
+          status, created_by_user_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'advisory', ?, ?)
+      `, id, auth.workshop_id, vehicleId, jobId, diagnosis?.id ?? null,
+        String(part.id), score, JSON.stringify(reason), auth.id, sessionClockNow());
+      recommendations.push({ id, part_id: part.id, sku: part.sku, name: part.name, score, reason });
+    }
+    response.status(201).json({ recommendations });
+  } catch (error) { next(error); }
+}));
+
+app.get('/api/intelligence/vehicles/:vehicleId/parts', requireAuth, asyncRoute(async (request, response, next) => {
+  try {
+    const auth = response.locals.auth as AuthContext;
+    await requireDiagnosisVehicleAccess(request.params.vehicleId, auth);
+    const rows = await db.query(`
+      SELECT r.id, r.score, r.status, r.feedback, r.reason_json, r.created_at,
+             p.id AS part_id, p.sku, p.name, p.category, p.quantity, p.selling_price_cents
+      FROM part_recommendations r
+      JOIN parts p ON p.id = r.part_id AND p.workshop_id = r.workshop_id
+      WHERE r.workshop_id = ? AND r.vehicle_id = ?
+      ORDER BY r.score DESC, r.created_at DESC LIMIT 25
+    `, auth.workshop_id, request.params.vehicleId);
+    response.json({ recommendations: rows });
+  } catch (error) { next(error); }
+}));
+
+app.post('/api/intelligence/parts/recommendations/:id/feedback', requireAuth, asyncRoute(async (request, response, next) => {
+  try {
+    const auth = response.locals.auth as AuthContext;
+    requireIntelligenceStaff(auth);
+    const body = requireObject(request.body);
+    const feedback = requiredText(body.feedback, 'Feedback', 1, 32);
+    if (!['accepted', 'rejected', 'used', 'not_used'].includes(feedback)) throw new HttpError(400, 'Unsupported feedback value.');
+    const result = await db.execute(`
+      UPDATE part_recommendations SET feedback = ? WHERE id = ? AND workshop_id = ?
+    `, feedback, request.params.id, auth.workshop_id);
+    if (result.affectedRows === 0) throw new HttpError(404, 'Recommendation not found.');
+    response.json({ updated: true });
+  } catch (error) { next(error); }
+}));
+
+async function requireTwinConsent(vehicleId: string, auth: AuthContext): Promise<void> {
+  const consent = await db.first(`
+    SELECT is_granted FROM vehicle_data_consents
+    WHERE vehicle_id = ? AND workshop_id = ? AND scope = 'telemetry'
+  `, vehicleId, auth.workshop_id) as { is_granted: number } | undefined;
+  if (!consent || consent.is_granted !== 1) {
+    throw new HttpError(403, 'Telemetry consent has not been recorded for this vehicle.');
+  }
+}
+
+app.get('/api/twin/vehicles/:vehicleId/consent', requireAuth, asyncRoute(async (request, response, next) => {
+  try {
+    const auth = response.locals.auth as AuthContext;
+    requireIntelligenceStaff(auth);
+    const consent = await db.first(`
+      SELECT id, scope, is_granted, granted_at, revoked_at, recorded_by_name
+      FROM vehicle_data_consents WHERE vehicle_id = ? AND workshop_id = ? AND scope = 'telemetry'
+    `, request.params.vehicleId, auth.workshop_id);
+    response.json({ consent: consent ?? null });
+  } catch (error) { next(error); }
+}));
+
+app.post('/api/twin/vehicles/:vehicleId/consent', requireAuth, asyncRoute(async (request, response, next) => {
+  try {
+    const auth = response.locals.auth as AuthContext;
+    requireIntelligenceStaff(auth);
+    await requireDiagnosisVehicleAccess(request.params.vehicleId, auth);
+    const body = requireObject(request.body);
+    const isGranted = body.is_granted === true;
+    const id = randomUUID();
+    const now = sessionClockNow();
+    await db.execute(`
+      INSERT INTO vehicle_data_consents (
+        id, workshop_id, vehicle_id, customer_id, scope, is_granted,
+        granted_at, revoked_at, recorded_by_user_id, recorded_by_name, created_at
+      ) VALUES (?, ?, ?, ?, 'telemetry', ?, ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        is_granted = VALUES(is_granted), granted_at = VALUES(granted_at),
+        revoked_at = VALUES(revoked_at), recorded_by_user_id = VALUES(recorded_by_user_id),
+        recorded_by_name = VALUES(recorded_by_name)
+    `, id, auth.workshop_id, request.params.vehicleId,
+      (await db.first('SELECT customer_id FROM vehicles WHERE id = ? AND workshop_id = ?', request.params.vehicleId, auth.workshop_id) as { customer_id: string }).customer_id,
+      isGranted ? 1 : 0, isGranted ? now : null, isGranted ? null : now, auth.id, auth.name, now);
+    response.json({ consent: { vehicle_id: request.params.vehicleId, scope: 'telemetry', is_granted: isGranted } });
+  } catch (error) { next(error); }
+}));
+
+app.post('/api/twin/telemetry', requireAuth, asyncRoute(async (request, response, next) => {
+  try {
+    const auth = response.locals.auth as AuthContext;
+    requireIntelligenceStaff(auth);
+    const body = requireObject(request.body);
+    const vehicleId = requiredText(body.vehicle_id, 'Vehicle', 1, 36);
+    await requireDiagnosisVehicleAccess(vehicleId, auth);
+    await requireTwinConsent(vehicleId, auth);
+    const source = requiredText(body.source, 'Source', 1, 80);
+    const signals = body.signals;
+    if (!Array.isArray(signals) || signals.length === 0 || signals.length > 200) {
+      throw new HttpError(400, 'Signals must be an array with 1 to 200 entries.');
+    }
+    const receivedAt = sessionClockNow();
+    let lastSignalAt = receivedAt;
+    const state: Record<string, unknown> = {};
+    for (const item of signals) {
+      const signal = requireObject(item);
+      const key = requiredText(signal.signal_key, 'Signal key', 1, 120);
+      const value = signal.value;
+      if (value === undefined || typeof value === 'function') throw new HttpError(400, 'Each signal needs a value.');
+      const observedAt = queryText(signal.observed_at) || receivedAt;
+      if (Number.isNaN(new Date(observedAt).getTime())) throw new HttpError(400, 'Signal timestamps must be ISO-8601 values.');
+      if (new Date(observedAt).getTime() > new Date(lastSignalAt).getTime()) lastSignalAt = observedAt;
+      await db.execute(`
+        INSERT INTO vehicle_telemetry_events (
+          id, workshop_id, vehicle_id, source, signal_key, signal_value_json,
+          observed_at, received_at, provenance
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, randomUUID(), auth.workshop_id, vehicleId, source, key,
+        JSON.stringify(value), observedAt, receivedAt, source);
+      state[key] = value;
+    }
+    if (typeof state.odometer_km === 'number' || typeof state.odometer_km === 'string') {
+      state.odometer_km = Number(state.odometer_km);
+    }
+    await db.execute(`
+      INSERT INTO vehicle_twin_states (
+        vehicle_id, workshop_id, odometer_km, state_json, source, last_signal_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        odometer_km = VALUES(odometer_km), state_json = VALUES(state_json),
+        source = VALUES(source), last_signal_at = VALUES(last_signal_at), updated_at = VALUES(updated_at)
+    `, vehicleId, auth.workshop_id,
+      typeof state.odometer_km === 'number' ? state.odometer_km : null,
+      JSON.stringify(state), source, lastSignalAt, receivedAt);
+    response.status(202).json({ accepted: signals.length, last_signal_at: lastSignalAt });
+  } catch (error) { next(error); }
+}));
+
+app.get('/api/twin/vehicles/:vehicleId/state', requireAuth, asyncRoute(async (request, response, next) => {
+  try {
+    const auth = response.locals.auth as AuthContext;
+    await requireDiagnosisVehicleAccess(request.params.vehicleId, auth);
+    const state = await db.first(`
+      SELECT vehicle_id, odometer_km, state_json, source, last_signal_at, updated_at
+      FROM vehicle_twin_states WHERE vehicle_id = ? AND workshop_id = ?
+    `, request.params.vehicleId, auth.workshop_id);
+    response.json({ state: state ? { ...state, state_json: JSON.parse(String(state.state_json)) } : null });
+  } catch (error) { next(error); }
+}));
+
+app.get('/api/twin/vehicles/:vehicleId/history', requireAuth, asyncRoute(async (request, response, next) => {
+  try {
+    const auth = response.locals.auth as AuthContext;
+    await requireDiagnosisVehicleAccess(request.params.vehicleId, auth);
+    const limit = Math.min(Math.max(Number(request.query.limit ?? 100), 1), 500);
+    const events = await db.query(`
+      SELECT signal_key, signal_value_json, observed_at, source
+      FROM vehicle_telemetry_events
+      WHERE vehicle_id = ? AND workshop_id = ?
+      ORDER BY observed_at DESC LIMIT ${Number.isFinite(limit) ? limit : 100}
+    `, request.params.vehicleId, auth.workshop_id);
+    response.json({ events });
+  } catch (error) { next(error); }
+}));
+
+app.post('/api/twin/vin-decode', requireAuth, asyncRoute(async (request, response, next) => {
+  try {
+    const auth = response.locals.auth as AuthContext;
+    requireIntelligenceStaff(auth);
+    const body = requireObject(request.body);
+    const vin = requiredText(body.vin, 'VIN', 17, 17).toUpperCase();
+    if (!/^[A-HJ-NPR-Z0-9]{17}$/.test(vin)) throw new HttpError(400, 'Enter a valid 17-character VIN.');
+    const cached = await db.first('SELECT payload_json, provider, decoded_at FROM vehicle_vin_decodes WHERE vin = ?', vin);
+    if (cached) {
+      response.json({ decoded: JSON.parse(String(cached.payload_json)), provider: cached.provider, cached: true });
+      return;
+    }
+    const providerUrl = process.env.NEXTGEN_VIN_PROVIDER_URL;
+    if (!providerUrl) throw new HttpError(503, 'No VIN provider is configured. Set NEXTGEN_VIN_PROVIDER_URL.');
+    const providerResponse = await fetch(`${providerUrl.replace(/\/$/, '')}/${encodeURIComponent(vin)}`, {
+      headers: process.env.NEXTGEN_VIN_PROVIDER_KEY
+        ? { Authorization: `Bearer ${process.env.NEXTGEN_VIN_PROVIDER_KEY}` }
+        : {},
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!providerResponse.ok) throw new HttpError(502, `VIN provider returned ${providerResponse.status}.`);
+    const decoded = await providerResponse.json() as Record<string, unknown>;
+    await db.execute(`
+      INSERT INTO vehicle_vin_decodes (vin, payload_json, provider, decoded_at) VALUES (?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE payload_json = VALUES(payload_json), decoded_at = VALUES(decoded_at)
+    `, vin, JSON.stringify(decoded), new URL(providerUrl).host, sessionClockNow());
+    response.json({ decoded, provider: new URL(providerUrl).host, cached: false });
+  } catch (error) { next(error); }
+}));
+
+app.post('/api/visual/images', requireAuth, asyncRoute(async (request, response, next) => {
+  try {
+    const auth = response.locals.auth as AuthContext;
+    requireIntelligenceStaff(auth);
+    const body = requireObject(request.body);
+    const vehicleId = requiredText(body.vehicle_id, 'Vehicle', 1, 36);
+    await requireDiagnosisVehicleAccess(vehicleId, auth);
+    const imageUrl = requiredText(body.image_url, 'Image URL', 1, 1000);
+    if (!/^(https?:\/\/|\/)/.test(imageUrl)) throw new HttpError(400, 'Image URL must be absolute HTTP(S) or a local path.');
+    const id = randomUUID();
+    await db.execute(`
+      INSERT INTO vehicle_fault_images (
+        id, workshop_id, vehicle_id, job_id, diagnosis_id, image_url, mime_type,
+        source, captured_at, uploaded_by_user_id, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, id, auth.workshop_id, vehicleId, queryText(body.job_id) || null,
+      queryText(body.diagnosis_id) || null, imageUrl, queryText(body.mime_type) || null,
+      queryText(body.source) || 'manual_upload', queryText(body.captured_at) || null,
+      auth.id, sessionClockNow());
+    response.status(201).json({ image: { id, image_url: imageUrl } });
+  } catch (error) { next(error); }
+}));
+
+app.get('/api/visual/vehicles/:vehicleId/images', requireAuth, asyncRoute(async (request, response, next) => {
+  try {
+    const auth = response.locals.auth as AuthContext;
+    await requireDiagnosisVehicleAccess(request.params.vehicleId, auth);
+    const images = await db.query(`
+      SELECT id, image_url, mime_type, source, captured_at, created_at
+      FROM vehicle_fault_images WHERE workshop_id = ? AND vehicle_id = ? ORDER BY created_at DESC LIMIT 100
+    `, auth.workshop_id, request.params.vehicleId);
+    response.json({ images });
+  } catch (error) { next(error); }
+}));
+
+app.post('/api/visual/images/:id/annotations', requireAuth, asyncRoute(async (request, response, next) => {
+  try {
+    const auth = response.locals.auth as AuthContext;
+    requireIntelligenceStaff(auth);
+    const body = requireObject(request.body);
+    const componentKey = requiredText(body.component_key, 'Component', 1, 64);
+    const bbox = body.bbox;
+    if (!bbox || typeof bbox !== 'object' || Array.isArray(bbox)) throw new HttpError(400, 'A bounding box is required.');
+    const image = await db.first('SELECT id FROM vehicle_fault_images WHERE id = ? AND workshop_id = ?', request.params.id, auth.workshop_id);
+    if (!image) throw new HttpError(404, 'Image not found.');
+    const id = randomUUID();
+    await db.execute(`
+      INSERT INTO vehicle_image_annotations (
+        id, workshop_id, image_id, component_key, bbox_json, note, annotated_by_user_id, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `, id, auth.workshop_id, request.params.id, componentKey, JSON.stringify(bbox),
+      queryText(body.note) || null, auth.id, sessionClockNow());
+    response.status(201).json({ annotation: { id, component_key: componentKey } });
+  } catch (error) { next(error); }
+}));
+
+app.post('/api/visual/localize', requireAuth, asyncRoute(async (request, response, next) => {
+  try {
+    const auth = response.locals.auth as AuthContext;
+    requireIntelligenceStaff(auth);
+    const body = requireObject(request.body);
+    const vehicleId = requiredText(body.vehicle_id, 'Vehicle', 1, 36);
+    await requireDiagnosisVehicleAccess(vehicleId, auth);
+    const imageId = requiredText(body.image_id, 'Image', 1, 36);
+    const image = await db.first(`
+      SELECT id FROM vehicle_fault_images WHERE id = ? AND vehicle_id = ? AND workshop_id = ?
+    `, imageId, vehicleId, auth.workshop_id);
+    if (!image) throw new HttpError(404, 'Image not found for this vehicle.');
+    const annotations = await db.query(`
+      SELECT id, component_key, bbox_json FROM vehicle_image_annotations
+      WHERE image_id = ? AND workshop_id = ? ORDER BY created_at DESC
+    `, imageId, auth.workshop_id) as { id: string; component_key: string; bbox_json: string }[];
+    if (annotations.length === 0) throw new HttpError(400, 'Annotate at least one component before localizing.');
+
+    const localizations = [];
+    for (const annotation of annotations) {
+      const box = JSON.parse(annotation.bbox_json) as Record<string, unknown>;
+      const x = Number(box.x ?? box.left ?? 0);
+      const y = Number(box.y ?? box.top ?? 0);
+      const width = Number(box.width ?? box.w ?? 0);
+      const height = Number(box.height ?? box.h ?? 0);
+      const projection = {
+        normalized_center: [x + width / 2, y + height / 2],
+        normalized_size: [width, height],
+        component_key: annotation.component_key,
+        basis: 'manual_annotation',
+      };
+      const id = randomUUID();
+      await db.execute(`
+        INSERT INTO vehicle_visual_localizations (
+          id, workshop_id, vehicle_id, image_id, component_key, confidence,
+          projection_json, provider, status, created_at
+        ) VALUES (?, ?, ?, ?, ?, NULL, ?, 'manual_annotation', 'proposed', ?)
+      `, id, auth.workshop_id, vehicleId, imageId, annotation.component_key,
+        JSON.stringify(projection), sessionClockNow());
+      localizations.push({ id, component_key: annotation.component_key, projection });
+    }
+    response.status(201).json({ localizations });
+  } catch (error) { next(error); }
+}));
+
+app.get('/api/visual/vehicles/:vehicleId/localizations', requireAuth, asyncRoute(async (request, response, next) => {
+  try {
+    const auth = response.locals.auth as AuthContext;
+    await requireDiagnosisVehicleAccess(request.params.vehicleId, auth);
+    const rows = await db.query(`
+      SELECT id, image_id, component_key, confidence, projection_json, provider, status, created_at
+      FROM vehicle_visual_localizations
+      WHERE workshop_id = ? AND vehicle_id = ? ORDER BY created_at DESC LIMIT 100
+    `, auth.workshop_id, request.params.vehicleId);
+    response.json({ localizations: rows });
+  } catch (error) { next(error); }
+}));
+
+app.patch('/api/visual/localizations/:id/review', requireAuth, asyncRoute(async (request, response, next) => {
+  try {
+    const auth = response.locals.auth as AuthContext;
+    requireIntelligenceStaff(auth);
+    const body = requireObject(request.body);
+    const status = requiredText(body.status, 'Status', 1, 32);
+    if (!['confirmed', 'rejected'].includes(status)) throw new HttpError(400, 'Status must be confirmed or rejected.');
+    const result = await db.execute(`
+      UPDATE vehicle_visual_localizations SET status = ?, reviewed_by_user_id = ?
+      WHERE id = ? AND workshop_id = ?
+    `, status, auth.id, request.params.id, auth.workshop_id);
+    if (result.affectedRows === 0) throw new HttpError(404, 'Localization not found.');
+    response.json({ updated: true });
+  } catch (error) { next(error); }
+}));
+
+app.get('/api/smart-workshop/assets/:assetKey/validation', requireAuth, asyncRoute(async (request, response, next) => {
+  try {
+    const asset = await db.first(`
+      SELECT asset_key, label, model_path, license, license_url, source,
+             is_generic, is_exact_match, node_map_json, is_active
+      FROM vehicle_3d_assets WHERE asset_key = ?
+    `, request.params.assetKey);
+    if (!asset) throw new HttpError(404, '3D asset not found.');
+    const nodeMaps = await db.query(`
+      SELECT id, component_key, node_name, geometry_source, confidence,
+             verification_status, verified_by_name
+      FROM vehicle_component_node_maps WHERE asset_key = ?
+    `, request.params.assetKey);
+    const verified = nodeMaps.filter((row) => (row as { verification_status: string }).verification_status === 'verified').length;
+    response.json({
+      asset,
+      node_maps: nodeMaps,
+      integrity: {
+        has_license: Boolean(asset.license),
+        has_source: Boolean(asset.source),
+        exact_match_claim: asset.is_exact_match === 1,
+        verified_node_maps: verified,
+        total_node_maps: nodeMaps.length,
+      },
+    });
+  } catch (error) { next(error); }
+}));
+
+app.get('/api/smart-workshop/assets/:assetKey/node-maps', requireAuth, asyncRoute(async (request, response, next) => {
+  try {
+    const rows = await db.query(`
+      SELECT id, component_key, node_name, geometry_source, confidence,
+             verification_status, verified_by_name, notes
+      FROM vehicle_component_node_maps WHERE asset_key = ? ORDER BY component_key, node_name
+    `, request.params.assetKey);
+    response.json({ node_maps: rows });
+  } catch (error) { next(error); }
+}));
+
+app.post('/api/smart-workshop/assets/:assetKey/node-maps', requireAuth, asyncRoute(async (request, response, next) => {
+  try {
+    const auth = response.locals.auth as AuthContext;
+    requireIntelligenceStaff(auth);
+    const body = requireObject(request.body);
+    const componentKey = requiredText(body.component_key, 'Component', 1, 64);
+    const nodeName = requiredText(body.node_name, 'Node name', 1, 191);
+    const geometrySource = queryText(body.geometry_source) || 'exact';
+    if (!['exact', 'representative', 'procedural'].includes(geometrySource)) throw new HttpError(400, 'Unsupported geometry source.');
+    const id = randomUUID();
+    await db.execute(`
+      INSERT INTO vehicle_component_node_maps (
+        id, asset_key, component_key, node_name, geometry_source, confidence,
+        verification_status, verified_by_name, notes, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'proposed', NULL, ?, ?)
+    `, id, request.params.assetKey, componentKey, nodeName, geometrySource,
+      body.confidence === undefined ? null : Number(body.confidence),
+      queryText(body.notes) || null, sessionClockNow());
+    response.status(201).json({ node_map: { id, verification_status: 'proposed' } });
+  } catch (error) { next(error); }
+}));
+
+app.patch('/api/smart-workshop/node-maps/:id/verify', requireAuth, asyncRoute(async (request, response, next) => {
+  try {
+    const auth = response.locals.auth as AuthContext;
+    requireIntelligenceStaff(auth);
+    const result = await db.execute(`
+      UPDATE vehicle_component_node_maps
+      SET verification_status = 'verified', verified_by_name = ?
+      WHERE id = ?
+    `, auth.name, request.params.id);
+    if (result.affectedRows === 0) throw new HttpError(404, 'Node map not found.');
+    response.json({ updated: true });
+  } catch (error) { next(error); }
+}));
+
 app.use('/api', (_request, response) => {
   response.status(404).json({ error: 'API route not found.' });
 });
 
-const production = process.env.NODE_ENV === 'production' || process.argv.includes('--production');
-const vite = production
+const vite = IS_PRODUCTION
   ? undefined
   : await createViteServer({
       server: { middlewareMode: true },
@@ -3993,7 +5050,7 @@ if (vite) {
 }
 
 app.get('*', asyncRoute(async (request, response, next) => {
-  if (production) {
+  if (IS_PRODUCTION) {
     response.sendFile(resolve(process.cwd(), 'dist', 'index.html'), (error) => {
       if (error) next(error);
     });
@@ -4034,7 +5091,7 @@ app.use((error: unknown, _request: express.Request, response: Response, _next: N
 
 const port = Number(process.env.PORT ?? 3000);
 const server = app.listen(port, '0.0.0.0', () => {
-  console.log(`NEXTGEN ${production ? 'server' : 'development server'} listening on port ${port}`);
+  console.log(`NEXTGEN ${IS_PRODUCTION ? 'server' : 'development server'} listening on port ${port}`);
 });
 
 function closeServer(): void {

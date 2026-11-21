@@ -4,6 +4,7 @@ dist/
 coverage/
 data/*.sqlite*
 ml/vehicle_fault_model.joblib
+ml/vehicle_fault_calibration.joblib
 __pycache__/
 ml/__pycache__/
 .DS_Store

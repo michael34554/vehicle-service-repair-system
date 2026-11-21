@@ -1,6 +1,6 @@
 import type { ComponentKey, WorkshopStatus } from '@/shared/smartWorkshop';
 
-export type ViewerMode = 'exterior' | 'internal';
+export type ViewerMode = 'exterior' | 'interior' | 'mechanical' | 'exploded';
 export type ViewStyle = 'normal' | 'transparent' | 'exploded';
 export type CameraPreset = 'perspective' | 'front' | 'rear' | 'left' | 'right' | 'roof' | 'wheels';
 

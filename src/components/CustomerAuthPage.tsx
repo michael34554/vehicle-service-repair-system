@@ -29,7 +29,9 @@ export const CustomerAuthPage: React.FC<CustomerAuthProps> = ({ onAuthenticated,
       const response = await apiFetch(`/api/customer/auth/${mode}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: formData.get('email'), password }),
+        body: JSON.stringify(mode === 'register'
+          ? { email: formData.get('email'), password, phone: formData.get('phone') }
+          : { email: formData.get('email'), password }),
       }, false);
       const result = await response.json() as { error?: unknown };
       if (!response.ok) {
@@ -88,7 +90,7 @@ export const CustomerAuthPage: React.FC<CustomerAuthProps> = ({ onAuthenticated,
                 {mode === 'register' ? 'Create your account' : 'Sign in to NEXTGEN'}
               </h2>
               <p className="mt-3 text-sm leading-6 text-[#66758b]">
-                {mode === 'register' ? 'Use the email address registered with your workshop.' : 'View your vehicles, service history, and repair progress.'}
+                {mode === 'register' ? 'Use the email and phone number registered with your workshop.' : 'View your vehicles, service history, and repair progress.'}
               </p>
             </div>
 
@@ -97,6 +99,13 @@ export const CustomerAuthPage: React.FC<CustomerAuthProps> = ({ onAuthenticated,
                 <span className="mb-2 block text-sm font-bold text-[#26374e]">Email address</span>
                 <input autoComplete="email" name="email" required type="email" className="w-full rounded-xl border border-[#dce5ef] bg-white px-4 py-3.5 text-sm text-[#24344b] outline-none transition placeholder:text-[#8b99ac] focus:border-[#2794f4] focus:ring-4 focus:ring-[#2794f4]/10" placeholder="you@example.com" />
               </label>
+              {mode === 'register' && (
+                <label className="block">
+                  <span className="mb-2 block text-sm font-bold text-[#26374e]">Registered phone number</span>
+                  <input autoComplete="tel" name="phone" required type="tel" className="w-full rounded-xl border border-[#dce5ef] bg-white px-4 py-3.5 text-sm text-[#24344b] outline-none transition placeholder:text-[#8b99ac] focus:border-[#2794f4] focus:ring-4 focus:ring-[#2794f4]/10" placeholder="Phone number on your workshop record" />
+                  <span className="mt-1.5 block text-xs text-[#66758b]">We use this to verify the customer record before creating an account.</span>
+                </label>
+              )}
               <label className="block">
                 <span className="mb-2 block text-sm font-bold text-[#26374e]">Password</span>
                 <span className="relative block">

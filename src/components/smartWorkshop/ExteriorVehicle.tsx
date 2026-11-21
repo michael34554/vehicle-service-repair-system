@@ -10,6 +10,9 @@ interface Props {
   style: ViewStyle;
   onSelect: (key: ComponentKey) => void;
   interactive?: boolean;
+  modelPath?: string;
+  nodeMap?: Record<string, ComponentKey>;
+  focusSelected?: boolean;
 }
 
 type EmissiveMaterial = THREE.Material & { emissive: THREE.Color; emissiveIntensity: number };
@@ -18,20 +21,24 @@ function hasEmissive(material: THREE.Material): material is EmissiveMaterial {
   return 'emissive' in material && material.emissive instanceof THREE.Color && 'emissiveIntensity' in material;
 }
 
-function componentFromObject(object: THREE.Object3D | null): ComponentKey | null {
+function componentFromObject(object: THREE.Object3D | null, nodeMap: Record<string, ComponentKey>): ComponentKey | null {
   let current = object;
   while (current) {
-    const match = EXTERIOR_NODE_COMPONENTS[current.name];
+    const match = nodeMap[current.name];
     if (match) return match;
     current = current.parent;
   }
   return null;
 }
 
-/** Renders the licensed Ferrari GLB and exposes only the named nodes that map to real components. */
-export function ExteriorVehicle({ statuses, selected, style, onSelect, interactive = true }: Props) {
-  const { scene } = useGLTF(MODEL_PATH, DRACO_PATH);
+/** Renders the registered GLB asset. Only exact named nodes in the asset's node map are selectable. */
+export function ExteriorVehicle({
+  statuses, selected, style, onSelect, interactive = true,
+  modelPath = MODEL_PATH, nodeMap, focusSelected = false,
+}: Props) {
+  const { scene } = useGLTF(modelPath, DRACO_PATH);
   const shadow = useTexture('/assets/models/ferrari_ao.png');
+  const resolvedNodeMap = useMemo(() => ({ ...EXTERIOR_NODE_COMPONENTS, ...(nodeMap ?? {}) }), [nodeMap]);
   const model = useMemo(() => scene.clone(true), [scene]);
 
   // Materials are cloned once per mount so the cached GLTF is never mutated.
@@ -69,15 +76,16 @@ export function ExteriorVehicle({ statuses, selected, style, onSelect, interacti
 
   useEffect(() => {
     materials.forEach((entry, mesh) => {
-      const component = componentFromObject(mesh);
+      const component = componentFromObject(mesh, resolvedNodeMap);
       const status = component ? statuses[component]?.status ?? 'grey' : null;
       const isSelected = component !== null && selected === component;
+      const dimmed = focusSelected && selected !== null && !isSelected;
       const emissiveColor = status ? STATUS_COLORS[status] : '#000000';
-      const intensity = isSelected ? 0.9 : status === 'red' ? 0.7 : status === 'orange' ? 0.45 : 0;
+      const intensity = dimmed ? 0 : isSelected ? 0.9 : status === 'red' ? 0.7 : status === 'orange' ? 0.45 : 0;
       const list = Array.isArray(entry) ? entry : [entry];
       list.forEach((material) => {
         material.transparent = style === 'transparent';
-        material.opacity = style === 'transparent' ? 0.28 : 1;
+        material.opacity = style === 'transparent' ? (dimmed ? 0.12 : 0.28) : 1;
         material.depthWrite = style !== 'transparent';
         if (hasEmissive(material)) {
           material.emissive.set(emissiveColor);
@@ -85,10 +93,10 @@ export function ExteriorVehicle({ statuses, selected, style, onSelect, interacti
         }
       });
     });
-  }, [materials, statuses, selected, style]);
+  }, [materials, statuses, selected, style, focusSelected, resolvedNodeMap]);
 
   const handleClick = (event: { object: THREE.Object3D; stopPropagation: () => void }) => {
-    const component = componentFromObject(event.object);
+    const component = componentFromObject(event.object, resolvedNodeMap);
     if (!component) return;
     event.stopPropagation();
     onSelect(component);
@@ -100,7 +108,7 @@ export function ExteriorVehicle({ statuses, selected, style, onSelect, interacti
         object={model}
         onClick={interactive ? handleClick : undefined}
         onPointerOver={interactive ? (event: { object: THREE.Object3D; stopPropagation: () => void }) => {
-          if (!componentFromObject(event.object)) return;
+          if (!componentFromObject(event.object, resolvedNodeMap)) return;
           event.stopPropagation();
           document.body.style.cursor = 'pointer';
         } : undefined}

@@ -8,9 +8,11 @@ import {
   LogOut,
 } from 'lucide-react';
 import type { NavItemKey } from './Sidebar';
+import { isStaffRole } from '../../shared/permissions';
 
 interface TopHeaderProps {
   activeTab: NavItemKey;
+  userRole?: string;
   isDarkMode: boolean;
   onToggleDarkMode: () => void;
   onOpenRepairManagement: () => void;
@@ -22,6 +24,7 @@ interface TopHeaderProps {
 
 export const TopHeader: React.FC<TopHeaderProps> = ({
   activeTab,
+  userRole,
   isDarkMode,
   onToggleDarkMode,
   onOpenRepairManagement,
@@ -32,13 +35,15 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
 }) => {
   const [showNotifications, setShowNotifications] = useState(false);
   const pageTitle: Record<NavItemKey, string> = {
-    dashboard: 'Workshop Floor Live',
     customers: 'Customer Management',
     vehicles: 'Vehicle Management',
-    inventory: 'Spare Parts & Inventory',
-    job_cards: 'Service & Repair Management',
+    mechanics: 'Mechanic Management',
+    job_cards: 'Service and Repair Management',
+    inventory: 'Spare Parts and Inventory Management',
     diagnosis: 'AI Fault Diagnosis',
     smart_workshop: 'AI Smart Workshop',
+    dashboard: 'Workshop Floor Live',
+    mechanic_workspace: 'Mechanic Workspace',
   };
 
   return (
@@ -105,23 +110,26 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
           {isDarkMode ? <Sun className="w-5 h-5 text-amber-400" /> : <Moon className="w-5 h-5" />}
         </button>
 
-        {/* Vehicle module shortcut */}
-        <button
-          onClick={onOpenVehicleManagement}
-          className="hidden sm:inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg transition-colors border border-slate-200 dark:border-slate-700"
-        >
-          <CarFront className="w-3.5 h-3.5" />
-          <span>Manage Vehicles</span>
-        </button>
+        {/* Management shortcuts are hidden for technicians; use Mechanic Workspace instead. */}
+        {isStaffRole(userRole) && (
+          <>
+            <button
+              onClick={onOpenVehicleManagement}
+              className="hidden sm:inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg transition-colors border border-slate-200 dark:border-slate-700"
+            >
+              <CarFront className="w-3.5 h-3.5" />
+              <span>Manage Vehicles</span>
+            </button>
 
-        {/* Repair module shortcut */}
-        <button
-          onClick={onOpenRepairManagement}
-          className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 active:bg-blue-800 rounded-lg shadow-sm transition-colors"
-        >
-          <Plus className="w-3.5 h-3.5" />
-          <span className="whitespace-nowrap">New Repair Job</span>
-        </button>
+            <button
+              onClick={onOpenRepairManagement}
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 active:bg-blue-800 rounded-lg shadow-sm transition-colors"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span className="whitespace-nowrap">New Repair Job</span>
+            </button>
+          </>
+        )}
         <button
           onClick={onSignOut}
           className="p-2 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
