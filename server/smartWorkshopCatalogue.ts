@@ -474,7 +474,7 @@ export function registerSmartWorkshopCatalogueRoutes(deps: CatalogueDeps): void 
         asset: descriptor,
         node_map: Object.entries(descriptor?.node_map ?? {}).map(([node, component_key]) => ({ node, component_key })),
         disclaimer: descriptor?.availability_status === 'available'
-          ? 'Model-specific asset. Verify the asset version against the vehicle before relying on component placement.'
+          ? 'Model-specific asset at manufacturer/model level. Verify generation, model year, trim and component nodes against the vehicle before relying on component placement.'
           : 'No verified model-specific 3D asset is available. Internal components are procedural inspection assemblies and are not an exact replica of this vehicle.',
       });
     } catch (error) { next(error); }

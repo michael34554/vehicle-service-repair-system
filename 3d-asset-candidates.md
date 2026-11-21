@@ -1,14 +1,17 @@
 # 3D asset candidate queue — AI Smart Workshop
 
-**Status: proposed only.** No candidate below has been downloaded, added to
-`public/assets/models/`, registered in `vehicle_3d_assets`, or linked to a
-catalogue model. The existing Ferrari 458 Italia GLB remains the clearly
-labelled representative fallback until you approve a change.
+**Status: mixed.** The Volkswagen Golf entry below has been downloaded,
+normalized, registered as `vw-golf` and linked to the existing Golf catalogue
+model. Every other candidate remains proposed only: no other candidate has been
+downloaded, added to `public/assets/models/`, registered in
+`vehicle_3d_assets`, or linked to a catalogue model. The Ferrari 458 Italia GLB
+remains a clearly labelled, non-selectable generic illustration and is never
+substituted for a selected vehicle.
 
-This queue exists because the current viewer already supports per-model GLB
-selection, named-node highlighting, 360° orbit/zoom and procedural mechanical
-views, but the repository contains only one licensed vehicle body asset and no
-model-specific interior asset.
+This queue exists because the current viewer supports per-model GLB selection,
+named-node highlighting, 360° orbit/zoom and procedural mechanical views, but
+the repository now contains one model-specific Golf body asset, one generic
+Ferrari illustration and no verified model-specific interior asset.
 
 ## Evaluation legend
 
@@ -25,6 +28,7 @@ model-specific interior asset.
 
 | ID | Candidate | Manufacturer/model match | Author / source | License evidence | File / size | Redistribution | Intended use | Status |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `vw-golf-poly-pizza` | Volkswagen Golf Mk-series (low-poly) | Named Golf Mk-series representation; generation, model year and trim not established. Registered to the existing `vw-golf` catalogue model. | Yogoshimo 2.0 (uploader) / YogoshimoMortiz (original creator); [Poly Pizza model page](https://poly.pizza/m/2u4e9d0aePt) | [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/) confirmed by the model page and its embedded metadata. | Local `public/assets/models/volkswagen/golf.glb`, 74,340 bytes / 680 tris; original 73,020 bytes. | Yes, with attribution; GLB re-centred, grounded and scaled with normals renormalized. | Model-specific Golf exterior. No verified component nodes; no interior; mechanical/exploded views are procedural. | **Already integrated** |
 | `r34-lexyc16` | Nissan Skyline R34 GT-R | Exact model: Nissan Skyline R34 GT-R. Not currently a catalogue model; add `nissan-skyline-r34-gt-r` or use as a labelled Nissan representative. | Lexyc16; [original Sketchfab model](https://sketchfab.com/3d-models/nissan-skyline-r34-gt-r-ff8fb2251dfa4bb9979e7022c5a6666c); redistributed in [ohmiler/R34-Midnight-Garage](https://github.com/ohmiler/R34-Midnight-Garage) | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); stated in the [repository README](https://raw.githubusercontent.com/ohmiler/R34-Midnight-Garage/main/README.md) and linked to the original model. GitHub repository license field is empty, so attribution must quote the README and original model page. | [Raw GLB](https://raw.githubusercontent.com/ohmiler/R34-Midnight-Garage/main/nissan_skyline_r34_gt-r.glb), 5,048,896 bytes. README says a prepared 4.35 MB derivative exists but the original is preserved in the repo. | Yes, with author/title/source/license attribution in `ATTRIBUTION.md`, API metadata and UI. | Exterior model for Nissan; candidate for a new exact catalogue model. Mesh/node map must be inspected before any component is clickable. | **Verified with attribution caveat** |
 | `bmw-x5-e53-powerbridge` | BMW X5 E53 Restyling | Exact BMW X5 E53. Useful for the existing `bmw-x3` model only as a labelled BMW representative, or add a new `bmw-x5-e53` model. | takeover / takeoverteam; [Sketchfab source](https://sketchfab.com/3d-models/bmw-x5-e53-restyling-high-quality-1dfdb422f05d44b287e332bec4311c50); [API evidence](https://api.sketchfab.com/v3/models/1dfdb422f05d44b287e332bec4311c50); redistributed in [PowerBridge-ai/tg-vehicle-library](https://github.com/PowerBridge-ai/tg-vehicle-library) | CC BY 4.0 confirmed by Sketchfab API and embedded GLB `asset.extras`; link the [license](https://creativecommons.org/licenses/by/4.0/) and credit the author. PowerBridge repo has no blanket license; rely on embedded attribution. | [Raw GLB](https://raw.githubusercontent.com/PowerBridge-ai/tg-vehicle-library/master/0000_bmw_e53-restyling_1dfdb4.glb), 29,224,656 bytes; ~209,596 tris / 455,485 verts; 36 images. | Yes, with attribution. | Realistic exact BMW exterior; no interior in manifest. Large file, so optimize before using as a default. Node map pending. | **Verified direct file; heavy** |
 | `mercedes-amgt-2016` | Mercedes-Benz AMG GT 2016 | Exact 2016 Mercedes-AMG GT, not an exact match for current C-Class/E-Class/GLC/A-Class models. Add a new catalogue model or label as Mercedes representative. | 3D Cars Studio / Ahmed Fadl Elsayed; [Sketchfab source](https://sketchfab.com/3d-models/mercedes-benz-amg-gt-2016-323167df949a45939d955430cce75d4f); [API evidence](https://api.sketchfab.com/v3/models/323167df949a45939d955430cce75d4f); redistributed in [PowerBridge-ai/tg-vehicle-library](https://github.com/PowerBridge-ai/tg-vehicle-library) | CC BY 4.0 confirmed by Sketchfab API and embedded GLB metadata. | [Raw GLB](https://raw.githubusercontent.com/PowerBridge-ai/tg-vehicle-library/master/2016_mercedes-benz_amg_with-interior_323167.glb), 39,219,716 bytes; ~1,311,059 tris / 726,550 verts. | Yes, with attribution. | Exact Mercedes with interior. Very heavy for web; optimize/decimate before integration. | **Verified direct file; optimize required** |
@@ -36,7 +40,7 @@ model-specific interior asset.
 | `spectral-gt-rs` | Spectral GT RS | Fictional procedural sports car; representative only. | JaronKBragg7337; [repository](https://github.com/JaronKBragg7337/spectral-gt-rs) | [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/); [LICENSE](https://raw.githubusercontent.com/JaronKBragg7337/spectral-gt-rs/main/LICENSE) and [README](https://raw.githubusercontent.com/JaronKBragg7337/spectral-gt-rs/main/README.md). | [Game-ready GLB](https://raw.githubusercontent.com/JaronKBragg7337/spectral-gt-rs/main/spectral_gt_rs_game_ready.glb), 4,688,844 bytes; 263 exported objects including 59 mechanical-detail objects. | Yes, CC0; no attribution required. | One GLB containing exterior, detailed cockpit (dashboard, displays, seats, belts, steering wheel, shifter, door panels) and mechanical nodes (engine bay, radiator, turbo, control arms, dampers/coil springs, brake discs/calipers, exhaust). Animations include doors, hood and steering. Game-ready procedural PBR, not CAD-accurate or photoreal scan. | **Verified** |
 | `grab3d-car-parts` | Grab3D Cozy Car Parts & Garage Kit | Generic components, not manufacturer-specific. | Grab3D; [kit page](https://grab3d.com/kits/cozy-car-parts/) | [CC0 1.0](https://grab3d.com/license/) plus per-model `LICENSE.txt` / `manifest.json`, e.g. [radiator license](https://grab3d.com/dl/car-radiator/LICENSE.txt). | Direct GLBs: [inline-4 engine](https://grab3d.com/dl/car-engine/car-engine.glb) 1.35 MB / 19,668 tris; [V8 engine](https://grab3d.com/dl/v8-engine/v8-engine.glb) 1.52 MB / 19,988 tris; [manual gearbox](https://grab3d.com/dl/gearbox/gearbox.glb) 0.90 MB / 8,504 tris; [brake disc](https://grab3d.com/dl/brake-disc/brake-disc.glb) 0.74 MB / 8,122 tris; [radiator](https://grab3d.com/dl/car-radiator/car-radiator.glb) 0.97 MB / 7,688 tris; [battery](https://grab3d.com/dl/car-battery/car-battery.glb) 0.79 MB / 6,732 tris; [shock](https://grab3d.com/dl/shock-absorber/shock-absorber.glb) 0.72 MB / 6,424 tris; [muffler](https://grab3d.com/dl/exhaust-muffler/exhaust-muffler.glb) 0.47 MB / 5,044 tris. | Yes, CC0. | Replace or supplement procedural mechanical components with licensed models for engine, gearbox, brakes, cooling, battery, suspension and exhaust. Stylized, not OEM-accurate; must stay labelled generic. | **Verified** |
 | `grab3d-mechanical-parts` | Grab3D Cozy Mechanical Parts Kit | Generic teaching components, not manufacturer-specific. | Grab3D; [kit page](https://grab3d.com/kits/cozy-mechanical-parts/) | [CC0 1.0](https://grab3d.com/license/) plus per-model license/manifest files. | Direct GLBs: [differential cutaway](https://grab3d.com/dl/differential/differential.glb) 2.87 MB / 38,618 tris with `rotor_a` / `rotor_b`; [camshaft](https://grab3d.com/dl/camshaft/camshaft.glb) 1.53 MB / 19,312 tris with `rotor`; [coil spring set](https://grab3d.com/dl/coil-spring/coil-spring.glb) 1.33 MB / 19,344 tris. | Yes, CC0. | Exploded/educational views for drivetrain, valvetrain and suspension. Stylized/simplified, not OEM-accurate. | **Verified** |
-| `ferrari-458-threejs` | Ferrari 458 Italia (already bundled) | Exact Ferrari 458 Italia, but representative for all current catalogue models. | vicent091036; three.js example | CC BY 4.0; [evidence](https://github.com/mrdoob/three.js/issues/23089#issuecomment-1001258942) | Local `public/assets/models/ferrari.glb`, 1,681,572 bytes; Draco compressed. | Already in repository with attribution. | Existing exterior fallback. Keep until replaced or supplemented. | **Already integrated** |
+| `ferrari-458-threejs` | Ferrari 458 Italia (already bundled) | Exact Ferrari 458 Italia, but representative only and non-selectable in catalogue mode. | vicent091036; three.js example | CC BY 4.0; [evidence](https://github.com/mrdoob/three.js/issues/23089#issuecomment-1001258942) | Local `public/assets/models/ferrari.glb`, 1,681,572 bytes; Draco compressed. | Already in repository with attribution. | Generic labelled illustration only; never substituted for a selected vehicle. | **Already integrated (generic, non-selectable)** |
 
 ## Recommended approval packages
 
@@ -95,7 +99,8 @@ Rights-risk models explicitly excluded: CC BY-NC and CC BY-NC-SA vehicles, the c
    suggestions. Keyword suggestions are never auto-approved as component maps.
 4. **Normalize runtime transform.** Add an asset transform record (scale,
    rotation and offset) where the GLB units or up-axis differ from the current
-   viewer. Keep the fallback Ferrari transform unchanged.
+   viewer. The integrated Golf GLB was normalized before storage, with the
+   change recorded in `ATTRIBUTION.md`; the Ferrari asset is unchanged.
 5. **Build exact node maps.** Only real, inspected node names are stored in
    `vehicle_3d_assets.node_map_json`. Unmapped mechanical components remain in
    the clearly labelled procedural assembly.
@@ -119,8 +124,10 @@ Rights-risk models explicitly excluded: CC BY-NC and CC BY-NC-SA vehicles, the c
 
 ## Safety and accuracy constraints
 
-- No asset is called an exact model match unless the asset itself is an exact
-  representation of that manufacturer/model/year/body style.
+- `is_exact_match` means the asset is a named representation of that
+  manufacturer/model and not a different vehicle. It does not certify a
+  specific generation, model year, trim or engineering geometry unless that is
+  independently recorded; the Golf entry explicitly leaves those unverified.
 - No component becomes clickable unless a real node name is present in that
   asset's approved node map.
 - Interior and mechanical assets are labelled as representative when they are

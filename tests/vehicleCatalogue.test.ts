@@ -152,6 +152,45 @@ test('asset descriptors derive availability from the filesystem and never promot
   assert.equal(disabled.availability_status, 'disabled');
 });
 
+test('the Volkswagen Golf catalogue asset is a real licensed local GLB', () => {
+  const glb = readFileSync(resolve(root, 'public/assets/models/volkswagen/golf.glb'));
+  assert.equal(glb.toString('ascii', 0, 4), 'glTF');
+  assert.equal(glb.readUInt32LE(4), 2);
+  assert.equal(glb.readUInt32LE(8), glb.length);
+  assert.ok(glb.length > 50_000, 'Golf GLB is unexpectedly small');
+
+  const attribution = read('public/assets/models/ATTRIBUTION.md');
+  assert.match(attribution, /## volkswagen\/golf\.glb/);
+  assert.match(attribution, /CC BY 3\.0/);
+  assert.match(attribution, /poly\.pizza\/m\/2u4e9d0aePt/);
+  assert.match(attribution, /Yogoshimo 2\.0/);
+  assert.match(attribution, /not a verified exact generation, model year or trim/i);
+
+  const seed = read('server/smartWorkshopSeed.ts');
+  assert.match(seed, /BUNDLED_MODEL_ASSETS/);
+  assert.match(seed, /'vw-golf': \{/);
+  assert.match(seed, /license: 'CC BY 3\.0'/);
+  assert.match(seed, /licenseUrl: 'https:\/\/creativecommons\.org\/licenses\/by\/3\.0\/'/);
+
+  const descriptor = describeAsset({
+    asset_key: 'vw-golf',
+    label: 'Volkswagen Golf (licensed low-poly Mk representation)',
+    model_path: '/assets/models/volkswagen/golf.glb',
+    license: 'CC BY 3.0',
+    license_url: 'https://creativecommons.org/licenses/by/3.0/',
+    source: 'Poly Pizza',
+    availability_status: 'available',
+    is_generic: 0,
+    is_exact_match: 1,
+    is_catalogue_selectable: 1,
+    available_view_modes_json: JSON.stringify(['exterior', 'mechanical', 'exploded']),
+  });
+  assert.equal(descriptor.file_exists, true);
+  assert.equal(descriptor.availability_status, 'available');
+  assert.deepEqual(descriptor.available_view_modes, ['exterior', 'mechanical', 'exploded']);
+  assert.deepEqual(descriptor.node_map, {});
+});
+
 test('the selector keeps catalogue exploration separate from registered-vehicle diagnosis', () => {
   const view = read('src/components/views/SmartWorkshopView.tsx');
   for (const field of [

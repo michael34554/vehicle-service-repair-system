@@ -15,8 +15,10 @@ import {
  *
  * Everything here is explicitly labelled. No model-specific technical
  * specification, failure rate or manufacturer-verified fault statistic is
- * invented. Model/asset links are representative because no manufacturer-
- * matched, licensed GLB is bundled with this repository.
+ * invented. The bundled Volkswagen Golf GLB is a named Golf Mk-series low-poly
+ * representation with an unverified generation/year/trim; its licence and
+ * provenance are recorded here. All other model slots remain unpopulated until
+ * a licensed GLB is supplied for them.
  */
 
 interface ManufacturerSeed {
@@ -27,6 +29,31 @@ interface ManufacturerSeed {
 }
 
 const PUBLIC_ROOT = fileURLToPath(new URL('../public', import.meta.url));
+const UNREGISTERED_ASSET_LICENSE = 'Asset licence must be supplied before this model is enabled';
+
+interface BundledModelAsset {
+  label: string;
+  license: string;
+  licenseUrl: string;
+  source: string;
+  notes: string;
+  viewModes: readonly string[];
+}
+
+/**
+ * Licensed model-specific files that are actually committed to this repository.
+ * Keys must match the central asset keys in shared/vehicleCatalogue.ts.
+ */
+const BUNDLED_MODEL_ASSETS: Readonly<Record<string, BundledModelAsset>> = {
+  'vw-golf': {
+    label: 'Volkswagen Golf (licensed low-poly Mk representation)',
+    license: 'CC BY 3.0',
+    licenseUrl: 'https://creativecommons.org/licenses/by/3.0/',
+    source: '"MK Golf - Low Poly" by Yogoshimo 2.0 / YogoshimoMortiz, Poly Pizza: https://poly.pizza/m/2u4e9d0aePt',
+    notes: 'Named Volkswagen Golf Mk-series low-poly representation. Generation, model year and trim are not established. The GLB was re-centred, grounded and scaled for the viewer; no component nodes were added or verified, so no exterior part is clickable. Interior is unavailable; mechanical and exploded views are procedural inspection assemblies.',
+    viewModes: ['exterior', 'mechanical', 'exploded'],
+  },
+};
 
 function assetFileExists(modelPath: string): boolean {
   if (!modelPath.startsWith('/assets/')) return false;
@@ -461,23 +488,25 @@ export async function seedSmartWorkshopCatalogue(database: typeof db): Promise<C
     for (const model of manufacturer.models) {
       const { assetKey, modelPath } = assetKeyFor(manufacturer.name, model.name, model.id);
       const available = assetFileExists(modelPath);
+      const bundled = BUNDLED_MODEL_ASSETS[assetKey];
       await database.execute(`
         INSERT IGNORE INTO vehicle_3d_assets
           (asset_key, label, model_path, license, license_url, source, is_generic, is_exact_match,
            node_map_json, notes, manufacturer_name, model_name, available_view_modes_json,
            inspectable_components_json, availability_status, is_catalogue_selectable, created_at, updated_at)
-        VALUES (?, ?, ?, ?, NULL, ?, 0, ?, '{}', ?, ?, ?, ?, ?, ?, 1, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, 0, ?, '{}', ?, ?, ?, ?, ?, ?, 1, ?, ?)
       `, assetKey,
-        `${manufacturer.name} ${model.name}`,
+        bundled?.label ?? `${manufacturer.name} ${model.name}`,
         modelPath,
-        'Asset licence must be supplied before this model is enabled',
-        `Local 3D asset slot for ${manufacturer.name} ${model.name}. Add the licensed GLB at this path and register verified nodes before enabling exact inspection.`,
+        bundled?.license ?? UNREGISTERED_ASSET_LICENSE,
+        bundled?.licenseUrl ?? null,
+        bundled?.source ?? `Local 3D asset slot for ${manufacturer.name} ${model.name}. Add the licensed GLB at this path and register verified nodes before enabling exact inspection.`,
         available ? 1 : 0,
-        available
+        bundled?.notes ?? (available
           ? 'Licensed model-specific GLB detected. Verify licence and component nodes before relying on it.'
-          : `No 3D model file is present at ${modelPath}. Add the licensed GLB/GLTF asset to enable this model.`,
+          : `No 3D model file is present at ${modelPath}. Add the licensed GLB/GLTF asset to enable this model.`),
         manufacturer.name, model.name,
-        JSON.stringify(available ? ['exterior', 'mechanical', 'exploded'] : []),
+        JSON.stringify(bundled?.viewModes ?? (available ? ['exterior', 'mechanical', 'exploded'] : [])),
         '[]',
         available ? 'available' : 'missing', now, now);
       await database.execute(`
@@ -487,6 +516,20 @@ export async function seedSmartWorkshopCatalogue(database: typeof db): Promise<C
         WHERE asset_key = ?
       `, modelPath, available ? 1 : 0, manufacturer.name, model.name,
         available ? 'available' : 'missing', now, assetKey);
+      // Existing rows created before the Golf GLB was bundled still carry the
+      // placeholder licence. Populate verified metadata once; never overwrite
+      // an administrator's later licence edit.
+      if (bundled) {
+        await database.execute(`
+          UPDATE vehicle_3d_assets SET
+            label = ?, license = ?, license_url = ?, source = ?,
+            node_map_json = '{}', notes = ?, available_view_modes_json = ?,
+            inspectable_components_json = '[]', is_generic = 0, updated_at = ?
+          WHERE asset_key = ? AND license = ?
+        `, bundled.label, bundled.license, bundled.licenseUrl, bundled.source,
+          bundled.notes, JSON.stringify(bundled.viewModes), now, assetKey,
+          UNREGISTERED_ASSET_LICENSE);
+      }
     }
   }
 

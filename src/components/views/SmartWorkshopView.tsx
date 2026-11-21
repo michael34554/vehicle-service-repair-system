@@ -921,7 +921,7 @@ export const SmartWorkshopView: React.FC<Props> = ({ onViewRepair }) => {
         <p>
           <strong>Professional verification required.</strong> AI predictions are not diagnoses or verified failure probabilities, and confidence is calibrated only against synthetic grouped holdout data. A qualified mechanic must confirm findings before repair decisions.
           {effectiveAssetStatus === 'available' && activeAsset?.is_exact_match
-            ? ' The selected 3D asset is declared model-specific; verify its version and component nodes against the vehicle. Internal inspection geometry remains procedural unless verified nodes are provided.'
+            ? ' The selected 3D asset is model-specific at manufacturer/model level; verify its generation, model year, trim and component nodes against the vehicle. Internal inspection geometry remains procedural unless verified nodes are provided.'
             : effectiveAssetStatus === 'available'
               ? ' The 3D body is a licensed generic illustration, shown only because representative display was explicitly enabled; internal components are a procedural inspection assembly, not an exact replica of this vehicle.'
               : ' No verified model-specific 3D asset is available and no different vehicle is shown in its place. Internal components are a procedural inspection assembly, not an exact replica of this vehicle.'}
@@ -932,7 +932,7 @@ export const SmartWorkshopView: React.FC<Props> = ({ onViewRepair }) => {
         <div className="flex flex-wrap items-start justify-between gap-3 rounded-xl border border-slate-200 bg-white p-4 text-xs text-slate-600 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300">
           <div>
             <p className="font-semibold text-slate-900 dark:text-white">
-              3D asset: {activeAsset?.label ?? 'No asset configured'} · {activeAsset?.is_exact_match ? 'Declared model-specific match' : 'Not an exact model match'}
+              3D asset: {activeAsset?.label ?? 'No asset configured'} · {activeAsset?.is_exact_match ? 'Named model-specific asset' : 'Not an exact model match'}
             </p>
             {activeAsset ? (
               <>
