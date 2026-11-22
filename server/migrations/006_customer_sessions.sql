@@ -1,6 +1,6 @@
 -- DB-backed customer session and token lifecycle.
--- Staff sessions use jwt_sessions/jwt_tokens; customer sessions get the same
--- rotation, reuse detection and revocation guarantees here.
+-- Staff sessions use the jwt_sessions and jwt_tokens tables. Customer sessions
+-- get the same rotation, reuse detection and revocation guarantees here.
 
 CREATE TABLE IF NOT EXISTS customer_sessions (
   id VARCHAR(191) NOT NULL PRIMARY KEY,

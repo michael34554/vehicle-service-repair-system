@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { fileURLToPath } from 'node:url';
 import mysql, { type PoolConnection, type ResultSetHeader, type RowDataPacket } from 'mysql2/promise';
+import { splitSqlStatements } from './sqlStatements';
 
 type SqlValue = string | number | boolean | Date | Buffer | null | undefined;
 type QueryResult = RowDataPacket[] | ResultSetHeader;
@@ -126,7 +127,7 @@ export async function initializeDatabase(): Promise<void> {
     const schema = await readFile(fileURLToPath(migration.url), 'utf8');
     const connection = await pool.getConnection();
     try {
-      for (const statement of schema.split(';').map((part) => part.trim()).filter(Boolean)) {
+      for (const statement of splitSqlStatements(schema)) {
         await connection.query(statement);
       }
       await connection.execute('INSERT INTO schema_migrations (version) VALUES (?)', [migration.version]);

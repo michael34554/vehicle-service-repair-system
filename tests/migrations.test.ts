@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import test from 'node:test';
+import { splitSqlStatements } from '../server/sqlStatements.ts';
 
 const root = resolve(import.meta.dirname, '..');
 
@@ -58,4 +59,21 @@ test('customer sessions replace timestamp-only revocation', () => {
   assert.match(sql, /CREATE TABLE IF NOT EXISTS customer_jwt_tokens/);
   assert.match(sql, /absolute_expires_at/);
   assert.match(sql, /replaced_by_jti/);
+});
+
+test('SQL statements ignore semicolons inside comments and quoted strings', () => {
+  const statements = splitSqlStatements(`
+    -- staff sessions; customer sessions get the same guarantees
+    CREATE TABLE sample (id INT, label VARCHAR(20));
+    INSERT INTO sample (id, label) VALUES (1, 'semi; colon');
+  `);
+  assert.equal(statements.length, 2);
+  assert.match(statements[0], /CREATE TABLE sample/);
+  assert.match(statements[1], /'semi; colon'/);
+  assert.ok(statements.every((statement) => !statement.startsWith('customer sessions')));
+
+  const customerStatements = splitSqlStatements(read('server/migrations/006_customer_sessions.sql'));
+  assert.equal(customerStatements.length, 2);
+  assert.match(customerStatements[0], /CREATE TABLE IF NOT EXISTS customer_sessions/);
+  assert.match(customerStatements[1], /CREATE TABLE IF NOT EXISTS customer_jwt_tokens/);
 });
