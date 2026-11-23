@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS workshop_bays (
 
 INSERT IGNORE INTO workshop_bays (id, workshop_id, code, label, created_at, updated_at)
 SELECT CONCAT('bay-', LOWER(REPLACE(UUID(), '-', ''))), workshop_id,
-       LEFT(TRIM(bay), 80), TRIM(bay), UTC_TIMESTAMP(3), UTC_TIMESTAMP(3)
+       LEFT(TRIM(bay), 80), MAX(TRIM(bay)), UTC_TIMESTAMP(3), UTC_TIMESTAMP(3)
 FROM jobs
 WHERE bay IS NOT NULL AND TRIM(bay) <> ''
 GROUP BY workshop_id, LEFT(TRIM(bay), 80);

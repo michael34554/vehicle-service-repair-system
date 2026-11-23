@@ -14,7 +14,7 @@ import { LandingPage } from './components/LandingPage';
 import { apiFetch, initializeCsrfToken } from './api';
 
 import { CustomerAuthPage } from './components/CustomerAuthPage';
-import { CustomerDashboardView } from './components/views/CustomerDashboardView';
+import { CustomerPortal } from './components/customer/CustomerPortal';
 import { AiDiagnosisView } from './components/views/AiDiagnosisView';
 import { SmartWorkshopView } from './components/views/SmartWorkshopView';
 import { MechanicManagementView } from './components/views/MechanicManagementView';
@@ -56,18 +56,23 @@ export default function App() {
     };
     window.addEventListener('nextgen:session-expired', onSessionExpired);
     initializeCsrfToken()
-      .then(() => apiFetch('/api/auth/me'))
-      .then(async (response) => {
-        if (!response.ok) {
-          if (response.status === 401) {
-            const customerResponse = await apiFetch('/api/customer/auth/me');
-            if (customerResponse.ok && isMounted) setCurrentView('customer-dashboard');
-            return;
-          }
-          throw new Error(`Session check failed with status ${response.status}.`);
+      .then(async () => {
+        const staffResponse = await apiFetch('/api/auth/me');
+        if (!staffResponse.ok && staffResponse.status !== 401) {
+          throw new Error(`Session check failed with status ${staffResponse.status}.`);
         }
-        const session = await response.json() as { user: { id: string } | null };
-        if (isMounted && session.user) setCurrentView('dashboard');
+        const staffSession = staffResponse.status === 401
+          ? null
+          : await staffResponse.json() as { user: { id: string } | null };
+        if (staffSession?.user) {
+          if (isMounted) setCurrentView('dashboard');
+          return;
+        }
+
+        // Staff /me intentionally returns 200 with user:null when no staff cookies exist,
+        // so always probe the customer session before showing the landing page.
+        const customerResponse = await apiFetch('/api/customer/auth/me');
+        if (customerResponse.ok && isMounted) setCurrentView('customer-dashboard');
       })
       .catch((error: unknown) => {
         console.error('Unable to initialize the NEXTGEN session:', error);
@@ -146,6 +151,19 @@ export default function App() {
     }
   };
 
+  const handleCustomerSignOut = async () => {
+    try {
+      const response = await apiFetch('/api/customer/auth/logout', { method: 'POST' }, false);
+      if (!response.ok && response.status !== 204) {
+        throw new Error(`Sign out failed with status ${response.status}.`);
+      }
+    } catch (error) {
+      addToast('warning', 'Sign out failed', error instanceof Error ? error.message : 'Please try again.');
+    } finally {
+      setCurrentView('landing');
+    }
+  };
+
   if (isCheckingSession) {
     return (
       <main className="grid min-h-screen place-items-center bg-[#f4f7fb] text-[#1c5fa6]">
@@ -195,18 +213,7 @@ export default function App() {
   }
 
   if (currentView === 'customer-dashboard') {
-    return (
-      <>
-        <button
-          className="absolute top-4 right-4 bg-blue-600 text-white px-4 py-2 rounded"
-          onClick={async () => {
-            const response = await apiFetch('/api/customer/auth/logout', { method: 'POST' }, false);
-            if (response.ok) setCurrentView('landing');
-          }}
-        >Logout</button>
-        <CustomerDashboardView />
-      </>
-    );
+    return <CustomerPortal onLogout={handleCustomerSignOut} />;
   }
 
   return (

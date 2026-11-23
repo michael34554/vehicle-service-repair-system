@@ -24,12 +24,14 @@ test('every SQL migration is registered in version order', () => {
     '006_customer_sessions.sql',
     '007_ai_intelligence.sql',
     '008_vehicle_asset_catalogue.sql',
+    '009_customer_portal.sql',
   ]);
   for (const migration of migrations) {
     assert.ok(db.includes(migration), `db.ts does not register ${migration}`);
   }
   assert.ok(db.indexOf('006_customer_sessions.sql') < db.indexOf('007_ai_intelligence.sql'));
   assert.ok(db.indexOf('007_ai_intelligence.sql') < db.indexOf('008_vehicle_asset_catalogue.sql'));
+  assert.ok(db.indexOf('008_vehicle_asset_catalogue.sql') < db.indexOf('009_customer_portal.sql'));
 });
 
 test('intelligence migration creates the new lifecycle tables without destructive statements', () => {
@@ -51,6 +53,7 @@ test('intelligence migration creates the new lifecycle tables without destructiv
     assert.match(sql, new RegExp(`CREATE TABLE IF NOT EXISTS ${table}\\b`));
   }
   assert.doesNotMatch(sql, /\b(DROP|TRUNCATE|DELETE FROM)\b/i);
+  assert.match(sql, /LEFT\(TRIM\(bay\), 80\), MAX\(TRIM\(bay\)\)/);
 });
 
 test('customer sessions replace timestamp-only revocation', () => {

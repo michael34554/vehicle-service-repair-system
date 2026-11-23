@@ -24,7 +24,7 @@ NEXTGEN provides eight workshop modules in this standard order: Customer Managem
 4. Install dependencies with `npm install`.
 5. Start the app and API with `npm run dev`, then open `http://localhost:3000`.
 
-On startup, the server applies pending versioned MySQL migrations and records them in `schema_migrations`: `002_ai_diagnoses.sql`, `003_smart_workshop.sql`, `004_mechanic_management.sql`, `005_smart_workshop_catalogue.sql`, `006_customer_sessions.sql`, and `007_ai_intelligence.sql`. The initial schema is in `server/schema.sql`. Applied migrations are not recreated or cleared on later starts. The project does not include a legacy data-import utility; the MySQL schema remains available as raw SQL files. `scripts/verifySmartWorkshopDb.mjs` checks the catalogue migration and seed read-only.
+On startup, the server applies pending versioned MySQL migrations and records them in `schema_migrations`: `002_ai_diagnoses.sql`, `003_smart_workshop.sql`, `004_mechanic_management.sql`, `005_smart_workshop_catalogue.sql`, `006_customer_sessions.sql`, `007_ai_intelligence.sql`, `008_vehicle_asset_catalogue.sql`, and `009_customer_portal.sql`. The initial schema is in `server/schema.sql`. Applied migrations are not recreated or cleared on later starts. The project does not include a legacy data-import utility; the MySQL schema remains available as raw SQL files. `scripts/verifySmartWorkshopDb.mjs` checks the catalogue migration and seed read-only.
 
 ## Accounts and data
 
@@ -47,6 +47,26 @@ The module stores full name in the existing `display_name` column and keeps `pho
 - `PUT /api/customers/:id` — update profile details while preserving ID and registration date
 
 All endpoints use the existing JWT cookies, CSRF validation, workshop scoping, and role checks. Customer profiles reserve space for future vehicle and service-history integrations; this module does not fabricate or add those records.
+
+## Customer portal
+
+The Customer Portal is part of this application; it is not a separate app and does not replace the staff dashboards. It reuses the existing `customers` → `vehicles` → `jobs` relationships, the customer JWT session tables from migration `006`, and the existing repair-status vocabulary. Migration `009_customer_portal.sql` adds the customer account username mapping and persisted customer notifications. Historical repair status changes are backfilled into notifications from `repair_status_history`.
+
+Customer access uses only the registered customer name. The server looks for a unique customer record with that display name and issues the existing customer JWT session directly. No email address, phone number, password, or one-time code is requested. Ambiguous names are rejected. Legacy customer login/registration routes return `410`; administrator and staff sign-in remains unchanged.
+
+Portal endpoints (all customer-scoped by the verified session):
+
+- `POST /api/customer/auth/name` with `{ name }` — name-only customer sign-in
+- `GET /api/customer/auth/me`, `POST /api/customer/auth/refresh`, `POST /api/customer/auth/logout` — customer session
+- `GET /api/customer/dashboard` — welcome profile, summary counters, recent jobs and notifications
+- `GET /api/customer/vehicles` — vehicles linked to the signed-in customer
+- `GET /api/customer/jobs` and `GET /api/customer/jobs/:jobId` — live repair tracking and customer-safe detail/timeline
+- `GET /api/customer/service-history` — completed and collected repairs
+- `GET /api/customer/billing` — recorded payment/invoice rows and amounts derived from job, parts and payment records
+- `GET /api/customer/profile` and `PATCH /api/customer/profile` — read the workshop record and edit permitted contact fields
+- `GET /api/customer/notifications`, `PATCH /api/customer/notifications/:id/read`, `PATCH /api/customer/notifications/read-all` — customer repair updates
+
+No dummy customers, repairs, charges or transactions are created. Amounts show `Not recorded` when a workshop value is missing; invoice totals use a recorded final amount when present, then the recorded estimate. Repair tracking uses only existing statuses from `Received` through `Collected`; the shared stage mapping is in `shared/customerPortal.ts`. Customer notifications are generated from real staff status transitions and are workshop/customer scoped.
 
 ## Vehicle management
 
@@ -219,7 +239,7 @@ The API is served by the same server as the web app:
 - `GET /api/auth/csrf`
 - `POST /api/auth/register`, `POST /api/auth/login`, `GET /api/auth/me`, `POST /api/auth/refresh`, `POST /api/auth/logout`
 - `GET /api/users`, `POST /api/users`, `PATCH /api/users/:id`, `DELETE /api/users/:id` — protected staff-account operations retained for mechanic assignment
-- Customer endpoints are listed in [Customer management](#customer-management).
+- Customer management endpoints are listed in [Customer management](#customer-management); customer portal and passwordless sign-in endpoints are listed in [Customer portal](#customer-portal).
 - Vehicle endpoints are listed in [Vehicle management](#vehicle-management).
 - Repair endpoints are listed in [Service and repair management](#service-and-repair-management).
 - Mechanic management and workspace endpoints are listed in [Mechanic management and workspace](#mechanic-management-and-workspace).

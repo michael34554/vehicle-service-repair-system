@@ -6,7 +6,6 @@ import {
   BriefcaseBusiness,
   CarFront,
   ChartNoAxesCombined,
-  Clock3,
   Gauge,
 } from 'lucide-react';
 
@@ -64,38 +63,28 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onGetStarted, onSignIn
           onClick={onSignIn}
           className="rounded-full px-3 py-2 text-sm font-semibold text-white/85 transition hover:text-white sm:px-4"
         >
-          Sign in
+          Sign in Admin
         </button>
         <button
           type="button"
-          onClick={onGetStarted}
+          onClick={onCustomerPortal ?? onGetStarted}
           className="rounded-full bg-[#1479e8] px-4 py-2.5 text-sm font-bold text-white transition hover:bg-[#258bf5] sm:px-5"
-        >
-          Get started
-        </button>
-        <button
-          type="button"
-          onClick={onCustomerPortal}
-          className="rounded-full bg-[#39a8ff] px-4 py-2.5 text-sm font-bold text-[#081426] transition hover:bg-[#54b2ff] sm:px-5 ml-2"
         >
           Customer Portal
         </button>
       </nav>
     </header>
-
       <section className="relative z-10 mx-auto grid min-h-[calc(100vh-80px)] max-w-7xl items-center px-5 pb-20 pt-10 sm:px-8 sm:pt-14 lg:px-12 lg:pb-28 lg:pt-16">
         <div className="max-w-2xl">
           <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/10 px-3.5 py-2 text-xs font-bold uppercase tracking-[0.12em] text-[#d5e9ff] backdrop-blur-sm">
             <span className="h-2 w-2 rounded-full bg-[#2d9cff]" />
-            A smoother day at the shop
           </div>
           <h1 className="text-5xl font-extrabold leading-[1.06] tracking-[-0.055em] sm:text-6xl lg:text-[4.35rem]">
-            <span className="block">NEXTGEN</span>
-            <span className="mt-2 block text-[#54b2ff]">Drive excellence.</span>
+            <span className="block">NEXTGEN vehicle service & repair</span>
+            <span className="mt-2 block text-[#54b2ff]"></span>
           </h1>
           <p className="mt-6 max-w-xl text-base leading-7 text-white/80 sm:text-lg sm:leading-8">
-            Driving Excellence Through Smart Vehicle Care.
-            <span className="mt-2 block">One connected workspace for your customers, vehicles, service team, and every repair.</span>
+            <span className="mt-2 block"></span>
           </p>
           <div className="mt-8 flex flex-col gap-3 sm:flex-row">
             <button
@@ -117,11 +106,9 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onGetStarted, onSignIn
           <div className="mt-8 flex flex-wrap items-center gap-x-6 gap-y-3 text-xs font-semibold text-white/75">
             <span className="inline-flex items-center gap-2">
               <BadgeCheck className="h-4 w-4 text-[#54b2ff]" />
-              Built for busy workshops
             </span>
             <span className="inline-flex items-center gap-2">
-              <Clock3 className="h-4 w-4 text-[#54b2ff]" />
-              One view, from check-in to pickup
+
             </span>
           </div>
         </div>
@@ -153,8 +140,8 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onGetStarted, onSignIn
     </main>
     <footer className="border-t border-[#e1e8f1] bg-[#f4f7fb]">
       <div className="mx-auto flex max-w-7xl flex-col gap-3 px-5 py-6 text-xs font-medium text-[#849087] sm:flex-row sm:items-center sm:justify-between sm:px-8 lg:px-12">
-        <span className="font-extrabold tracking-[0.14em] text-[#1b2b42]">NEXTGEN</span>
-        <span>Driving Excellence Through Smart Vehicle Care.</span>
+        <span className="font-extrabold tracking-[0.14em] text-[#1b2b42]">NEXTGEN vehicle service & repair</span>
+        <span></span>
       </div>
     </footer>
   </div>

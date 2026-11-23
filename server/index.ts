@@ -36,7 +36,7 @@ import {
   isCustomerRole,
 } from './jwt';
 import { isStaffRole } from '../shared/permissions';
-
+import { customerNotificationTemplate, REPAIR_TRACKING_STAGES, repairStageIndex, repairStageLabel } from '../shared/customerPortal';
 const IS_PRODUCTION = process.env.NODE_ENV === 'production' || process.argv.includes('--production');
 const ACCESS_COOKIE = 'nextgen_access';
 const REFRESH_COOKIE = 'nextgen_refresh';
@@ -168,7 +168,7 @@ async function validateCustomerAuth(request: express.Request, response: Response
     JOIN customer_accounts ca ON ca.id = cs.customer_account_id
     JOIN customers c ON c.id = ca.customer_id AND c.workshop_id = ca.workshop_id
     WHERE tok.jti = ? AND tok.token_type = 'access' AND tok.revoked_at IS NULL
-      AND ca.id = ? AND ca.workshop_id = ? AND ca.customer_id = ?
+      AND cs.id = ? AND ca.workshop_id = ? AND ca.customer_id = ?
   `, claims.jti, claims.sid, claims.wid, claims.sub) as {
     account_id: string;
     customer_id: string;
@@ -360,6 +360,7 @@ function authRateLimit(maxRequests: number, windowMs: number): RequestHandler {
 
 const limitAuthAttempts = authRateLimit(10, 15 * 60 * 1000);
 const limitLoginAttempts = authRateLimit(10, 15 * 60 * 1000);
+const limitCustomerNameLogin = authRateLimit(5, 15 * 60 * 1000);
 
 async function validateAuth(request: express.Request, response: Response): Promise<boolean> {
   const token = readCookie(request, ACCESS_COOKIE);
@@ -500,7 +501,7 @@ function csrfProtection(request: express.Request, response: Response, next: Next
       }
     } catch (error) {
       const isLoginOrRegistration = request.path === '/auth/login' || request.path === '/auth/register' ||
-        request.path === '/customer/auth/login' || request.path === '/customer/auth/register';
+        request.path === '/customer/auth/name';
       if (!(error instanceof JwtError && error.code === 'expired') && !isLoginOrRegistration && request.path !== '/auth/logout' && request.path !== '/customer/auth/logout') {
         response.status(403).json({ error: 'csrf_validation_failed' });
         return;
@@ -2164,6 +2165,35 @@ function validateRepairDates(received: string, expected: string | null): void {
   }
 }
 
+/** Customer-safe notifications are derived only from repair statuses already recorded by staff. */
+async function createCustomerStatusNotification(
+  jobId: string,
+  workshopId: string,
+  status: string,
+  createdAt: string
+): Promise<void> {
+  const template = customerNotificationTemplate(status);
+  if (!template) return;
+  try {
+    const job = await db.first(`
+      SELECT v.customer_id
+      FROM jobs j
+      JOIN vehicles v ON v.id = j.vehicle_id AND v.workshop_id = j.workshop_id
+      WHERE j.id = ? AND j.workshop_id = ?
+    `, jobId, workshopId) as { customer_id: string } | undefined;
+    if (!job) return;
+    await db.execute(`
+      INSERT IGNORE INTO customer_notifications (
+        id, workshop_id, customer_id, job_id, event_key, type, title, message, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, randomUUID(), workshopId, job.customer_id, jobId,
+      `status:${status}:${createdAt}:${jobId}`, template.type, template.title, template.message, createdAt);
+  } catch (error) {
+    // A notification failure must never roll back a legitimate workshop repair update.
+    console.error('Unable to create customer repair notification:', error);
+  }
+}
+
 async function insertRepairStatusHistory(
   jobId: string,
   workshopId: string,
@@ -2179,6 +2209,7 @@ async function insertRepairStatusHistory(
       changed_by_user_id, changed_by_name, changed_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `, randomUUID(), workshopId, jobId, previousStatus, newStatus, note, auth.id, auth.name, changedAt);
+  await createCustomerStatusNotification(jobId, workshopId, newStatus, changedAt);
 }
 
 // Shared status transition used by Service & Repair, Workshop Floor Live, and mechanic work management.
@@ -4029,7 +4060,7 @@ registerMechanicRoutes({
   technicianStatuses: TECHNICIAN_STATUSES,
 });
 
-app.get('/api/:resource', requireAuth, authorizeResource('read'), asyncRoute(async (request, response, next) => {
+app.get('/api/:resource(customers|vehicles|jobs)', requireAuth, authorizeResource('read'), asyncRoute(async (request, response, next) => {
   try {
     const auth = response.locals.auth as AuthContext;
     const definition = getResource(request.params.resource);
@@ -4064,7 +4095,7 @@ app.get('/api/:resource', requireAuth, authorizeResource('read'), asyncRoute(asy
   }
 }));
 
-app.get('/api/:resource/:id', requireAuth, authorizeResource('read'), asyncRoute(async (request, response, next) => {
+app.get('/api/:resource(customers|vehicles|jobs)/:id', requireAuth, authorizeResource('read'), asyncRoute(async (request, response, next) => {
   try {
     const auth = response.locals.auth as AuthContext;
     const definition = getResource(request.params.resource);
@@ -4091,7 +4122,7 @@ app.get('/api/:resource/:id', requireAuth, authorizeResource('read'), asyncRoute
   }
 }));
 
-app.post('/api/:resource', requireAuth, authorizeResource('create'), asyncRoute(async (request, response, next) => {
+app.post('/api/:resource(customers|vehicles|jobs)', requireAuth, authorizeResource('create'), asyncRoute(async (request, response, next) => {
   try {
     const auth = response.locals.auth as AuthContext;
     const definition = getResource(request.params.resource);
@@ -4134,7 +4165,7 @@ app.post('/api/:resource', requireAuth, authorizeResource('create'), asyncRoute(
   }
 }));
 
-app.patch('/api/:resource/:id', requireAuth, authorizeResource('update'), asyncRoute(async (request, response, next) => {
+app.patch('/api/:resource(customers|vehicles|jobs)/:id', requireAuth, authorizeResource('update'), asyncRoute(async (request, response, next) => {
   try {
     const auth = response.locals.auth as AuthContext;
     if (request.params.resource === 'vehicles') {
@@ -4202,7 +4233,7 @@ app.patch('/api/:resource/:id', requireAuth, authorizeResource('update'), asyncR
   }
 }));
 
-app.delete('/api/:resource/:id', requireAuth, authorizeResource('delete'), asyncRoute(async (request, response, next) => {
+app.delete('/api/:resource(customers|vehicles|jobs)/:id', requireAuth, authorizeResource('delete'), asyncRoute(async (request, response, next) => {
   try {
     const auth = response.locals.auth as AuthContext;
     if (request.params.resource === 'customers') {
@@ -4217,78 +4248,118 @@ app.delete('/api/:resource/:id', requireAuth, authorizeResource('delete'), async
   }
 }));
 
-app.post('/api/customer/auth/register', limitAuthAttempts, asyncRoute(async (request, response) => {
-  const body = requireObject(request.body);
-  const email = normalizedEmail(body.email);
-  const password = requiredText(body.password, 'Password', 8, 128);
-  const phone = normalizedPhone(body.phone ?? body.phone_number);
+interface CustomerNameIdentity {
+  accountId: string;
+  customerId: string;
+  workshopId: string;
+  displayName: string;
+}
 
-  const customer = await db.first(`
-    SELECT id, workshop_id, display_name, email, phone_normalized
-    FROM customers WHERE lower(email) = ?
-  `, email) as {
-    id: string;
+async function findCustomerByName(
+  name: string,
+  createAccountWhenMissing: boolean
+): Promise<CustomerNameIdentity | null> {
+  const normalizedName = name.trim().toLowerCase();
+  const linked = await db.query<{
+    account_id: string;
+    customer_id: string;
     workshop_id: string;
     display_name: string;
-    email: string;
-    phone_normalized: string | null;
-  } | undefined;
+  }>(`
+    SELECT ca.id AS account_id, c.id AS customer_id, c.workshop_id, c.display_name
+    FROM customer_accounts ca
+    JOIN customers c ON c.id = ca.customer_id AND c.workshop_id = ca.workshop_id
+    WHERE LOWER(c.display_name) = ?
+    LIMIT 2
+  `, normalizedName);
 
-  // Proof of registration details: email alone is not sufficient to claim a customer record.
-  if (!customer || customer.phone_normalized !== phone.normalized) {
-    throw new HttpError(401, 'The email and registered phone number do not match a customer record.');
+  if (linked.length === 1) {
+    const row = linked[0];
+    return {
+      accountId: row.account_id,
+      customerId: row.customer_id,
+      workshopId: row.workshop_id,
+      displayName: row.display_name,
+    };
   }
-  const existing = await db.first('SELECT id FROM customer_accounts WHERE customer_id = ? AND workshop_id = ?', customer.id, customer.workshop_id);
-  if (existing) throw new HttpError(409, 'An account already exists for this customer. Please sign in.');
+  if (linked.length > 1) return null;
+  if (!createAccountWhenMissing) return null;
 
-  const csrf = readCookie(request, CSRF_COOKIE);
-  if (!csrf || !/^[a-f0-9]{64}$/.test(csrf)) throw new HttpError(403, 'csrf_validation_failed');
+  // A workshop may have customer records created before customer accounts existed.
+  // Link the existing customer record once; never create a second customer identity.
+  const candidates = await db.query<{
+    id: string;
+    workshop_id: string;
+    customer_code: string | null;
+    display_name: string;
+    email: string | null;
+  }>(`
+    SELECT c.id, c.workshop_id, c.customer_code, c.display_name, c.email
+    FROM customers c
+    WHERE LOWER(c.display_name) = ?
+    LIMIT 2
+  `, normalizedName);
+  if (candidates.length !== 1) return null;
 
-  const salt = randomBytes(16);
-  const passwordHash = await derivePassword(password, salt);
-  const now = sessionClockNow();
+  const customer = candidates[0];
   const accountId = randomUUID();
+  const now = sessionClockNow();
+  const salt = randomBytes(16);
+  // The stored secret is intentionally unusable. Customer sessions are granted by registered name.
+  const passwordHash = await derivePassword(randomBytes(32).toString('hex'), salt);
+  const resolvedUsername = customer.customer_code?.slice(0, 191) ?? null;
+  const accountEmail = customer.email?.trim() || `${customer.id}@customer.local`;
   await db.execute(`
-    INSERT INTO customer_accounts (id, customer_id, workshop_id, email, password_hash, password_salt, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `, accountId, customer.id, customer.workshop_id, email, passwordHash.toString('hex'), salt.toString('hex'), now, now);
+    INSERT INTO customer_accounts (
+      id, customer_id, workshop_id, username, email, password_hash, password_salt, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, accountId, customer.id, customer.workshop_id, resolvedUsername, accountEmail,
+    passwordHash.toString('hex'), salt.toString('hex'), now, now);
+  return {
+    accountId,
+    customerId: customer.id,
+    workshopId: customer.workshop_id,
+    displayName: customer.display_name,
+  };
+}
 
-  const tokens = await createCustomerSession(
-    { id: accountId, customer_id: customer.id, workshop_id: customer.workshop_id },
-    csrf
-  );
-  setCustomerAuthCookies(response, tokens.accessToken, tokens.refreshToken, csrf);
-  response.status(201).json({ customer: { id: customer.id, display_name: customer.display_name, email: customer.email } });
-}));
-
-app.post('/api/customer/auth/login', limitLoginAttempts, asyncRoute(async (request, response) => {
+app.post('/api/customer/auth/name', limitCustomerNameLogin, asyncRoute(async (request, response) => {
   const body = requireObject(request.body);
-  const email = normalizedEmail(body.email);
-  const password = requiredText(body.password, 'Password', 1, 128);
-  const account = await db.first('SELECT id, customer_id, workshop_id, email, password_hash, password_salt FROM customer_accounts WHERE lower(email) = ?', email) as {
-      id: string;
-      customer_id: string;
-      workshop_id: string;
-      email: string;
-      password_hash: string;
-      password_salt: string;
-    } | undefined;
-  const salt = account ? Buffer.from(account.password_salt, 'hex') : DUMMY_SALT;
-  const derivedHash = await derivePassword(password, salt);
-  const expectedHash = account ? Buffer.from(account.password_hash, 'hex') : DUMMY_HASH;
-  if (!account || !timingSafeEqual(derivedHash, expectedHash)) {
-    throw new HttpError(401, 'Email or password is incorrect.');
-  }
+  const name = requiredText(body.name, 'Customer name', 2, 191);
+  const identity = await findCustomerByName(name, true);
+  if (!identity) throw new HttpError(401, 'No unique customer matched that name.');
 
   const csrf = readCookie(request, CSRF_COOKIE);
   if (!csrf || !/^[a-f0-9]{64}$/.test(csrf)) throw new HttpError(403, 'csrf_validation_failed');
+
   const tokens = await createCustomerSession(
-    { id: account.id, customer_id: account.customer_id, workshop_id: account.workshop_id },
+    { id: identity.accountId, customer_id: identity.customerId, workshop_id: identity.workshopId },
     csrf
   );
   setCustomerAuthCookies(response, tokens.accessToken, tokens.refreshToken, csrf);
-  response.json({ customer: { id: account.customer_id, email: account.email } });
+  response.json({
+    customer: {
+      id: identity.customerId,
+      display_name: identity.displayName,
+    },
+  });
 }));
+
+// Legacy secret-based customer routes remain registered so older clients receive a clear
+// replacement message. Customer sessions are granted by the registered customer name only.
+app.post('/api/customer/auth/register', (_request, response) => {
+  response.status(410).json({
+    error: 'customer_registration_disabled',
+    message: 'Customer access uses your registered customer name.',
+  });
+});
+
+app.post('/api/customer/auth/login', (_request, response) => {
+  response.status(410).json({
+    error: 'customer_login_disabled',
+    message: 'Customer access uses your registered customer name.',
+  });
+});
 
 app.post('/api/customer/auth/refresh', limitAuthAttempts, asyncRoute(async (request, response) => {
   const token = readCookie(request, CUSTOMER_REFRESH_COOKIE);
@@ -4322,7 +4393,7 @@ app.post('/api/customer/auth/refresh', limitAuthAttempts, asyncRoute(async (requ
     JOIN customer_sessions cs ON cs.id = tok.session_id
     JOIN customer_accounts ca ON ca.id = cs.customer_account_id
     WHERE tok.jti = ? AND tok.token_type = 'refresh'
-      AND ca.id = ? AND ca.customer_id = ? AND ca.workshop_id = ?
+      AND cs.id = ? AND ca.customer_id = ? AND ca.workshop_id = ?
   `, claims.jti, claims.sid, claims.sub, claims.wid) as {
     jti: string;
     session_id: string;
@@ -4391,16 +4462,33 @@ app.post('/api/customer/auth/logout', asyncRoute(async (request, response) => {
 }));
 
 app.get('/api/customer/auth/me', requireCustomerAuth, asyncRoute(async (_request, response) => {
-  response.json({ customer: response.locals.customer });
+  const auth = response.locals.customer as {
+    customer_id: string;
+    workshop_id: string;
+    email: string;
+    display_name: string;
+  };
+  response.json({
+    customer: {
+      id: auth.customer_id,
+      display_name: auth.display_name,
+      email: auth.email,
+      workshop_id: auth.workshop_id,
+    },
+  });
 }));
 
 app.get('/api/customer/vehicles', requireCustomerAuth, asyncRoute(async (request, response) => {
   const customer = response.locals.customer as { customer_id: string; workshop_id: string };
   const vehicles = await db.query(`
-    SELECT id, plate, vin, make, model, model_year, color, mileage, created_at, updated_at
-    FROM vehicles
-    WHERE customer_id = ? AND workshop_id = ?
-    ORDER BY created_at DESC
+    SELECT v.id, v.plate, v.vin AS vin, v.engine_number, v.make, v.model,
+      v.model_year, v.color, v.mileage, v.engine_type, v.engine_capacity_cc,
+      v.fuel_type, v.transmission_type, v.drive_type, v.created_at, v.updated_at,
+      vm.name AS catalogue_model_name, vm.body_style, vm.specification_note
+    FROM vehicles v
+    LEFT JOIN vehicle_models vm ON vm.id = v.catalogue_model_id
+    WHERE v.customer_id = ? AND v.workshop_id = ?
+    ORDER BY v.created_at DESC
   `, customer.customer_id, customer.workshop_id);
   response.json({ vehicles });
 }));
@@ -4447,9 +4535,8 @@ app.get('/api/customer/jobs/:jobId/status-history', requireCustomerAuth, asyncRo
 
 app.get('/api/customer/vehicles/:vehicleId/service-history', requireCustomerAuth, asyncRoute(async (request, response, next) => {
   try {
-    const customer = response.locals.customer as { customer_id: string; workshop_id: string };
-    const vehicle = await db.first('SELECT id FROM vehicles WHERE id = ? AND customer_id = ? AND workshop_id = ?', request.params.vehicleId, customer.customer_id, customer.workshop_id);
-    if (!vehicle) throw new HttpError(404, 'Vehicle not found.');
+    const customer = customerPortalIdentity(response);
+    await requireCustomerVehicle(request.params.vehicleId, customer);
     const serviceHistory = await db.query(`
       SELECT j.id, j.job_no, j.service_type, j.status, j.repair_status,
         j.created_at, j.updated_at, j.promised_at,
@@ -4464,6 +4551,566 @@ app.get('/api/customer/vehicles/:vehicleId/service-history', requireCustomerAuth
   } catch (error) {
     next(error);
   }
+}));
+
+/* -------------------------------------------------------------------------- */
+/* Customer portal: dashboard, vehicles, repairs, billing, notifications, profile */
+/* -------------------------------------------------------------------------- */
+
+interface CustomerPortalIdentity {
+  account_id: string;
+  customer_id: string;
+  workshop_id: string;
+  email: string;
+  display_name: string;
+}
+
+function customerPortalIdentity(response: Response): CustomerPortalIdentity {
+  return response.locals.customer as CustomerPortalIdentity;
+}
+
+function toAmount(value: unknown): number {
+  const amount = Number(value ?? 0);
+  return Number.isFinite(amount) ? amount : 0;
+}
+
+function withStage<T extends object>(record: T) {
+  const status = (record as { repair_status?: unknown }).repair_status;
+  const normalized = typeof status === 'string' ? status : null;
+  return {
+    ...record,
+    stage: repairStageLabel(normalized),
+    stage_index: repairStageIndex(normalized),
+  };
+}
+
+async function requireCustomerVehicle(vehicleId: string, customer: CustomerPortalIdentity) {
+  const vehicle = await db.first(`
+    SELECT id, plate, make, model, model_year, vin, engine_number
+    FROM vehicles
+    WHERE id = ? AND customer_id = ? AND workshop_id = ?
+  `, vehicleId, customer.customer_id, customer.workshop_id);
+  if (!vehicle) throw new HttpError(404, 'Vehicle not found.');
+  return vehicle;
+}
+
+async function requireCustomerJob(jobId: string, customer: CustomerPortalIdentity) {
+  const job = await db.first(`
+    SELECT j.id, j.job_no, j.service_type, j.issue_description, j.repair_status,
+      j.repair_priority, j.status, j.promised_at, j.created_at, j.updated_at,
+      j.final_amount_cents, j.estimated_total_cost_cents,
+      j.estimated_labour_cost_cents, j.estimated_parts_cost_cents,
+      v.id AS vehicle_id, v.plate AS registration_number, v.make, v.model, v.model_year,
+      m.full_name AS assigned_mechanic_name, m.specialization AS assigned_mechanic_specialization
+    FROM jobs j
+    JOIN vehicles v ON v.id = j.vehicle_id AND v.workshop_id = j.workshop_id
+    LEFT JOIN users u ON u.id = j.assigned_technician AND u.workshop_id = j.workshop_id
+    LEFT JOIN mechanics m ON m.user_id = u.id AND m.workshop_id = j.workshop_id
+    WHERE j.id = ? AND j.workshop_id = ? AND v.customer_id = ?
+  `, jobId, customer.workshop_id, customer.customer_id);
+  if (!job) throw new HttpError(404, 'Repair job not found.');
+  return job;
+}
+
+app.get('/api/customer/dashboard', requireCustomerAuth, asyncRoute(async (_request, response) => {
+  const customer = customerPortalIdentity(response);
+  const profile = await db.first<{
+    id: string;
+    username: string;
+    full_name: string;
+    email: string | null;
+    phone: string | null;
+    address: string | null;
+  }>(`
+    SELECT c.id, COALESCE(ca.username, c.customer_code) AS username,
+      c.display_name AS full_name, c.email, c.phone, c.address
+    FROM customers c
+    LEFT JOIN customer_accounts ca
+      ON ca.customer_id = c.id AND ca.workshop_id = c.workshop_id
+    WHERE c.id = ? AND c.workshop_id = ?
+  `, customer.customer_id, customer.workshop_id);
+  if (!profile) throw new HttpError(404, 'Customer profile not found.');
+
+  const [vehicleCount, activeJobs, completedRepairs, pendingPayments, notifications, recentJobs] = await Promise.all([
+    db.first<{ count: number }>(`
+      SELECT COUNT(*) AS count FROM vehicles
+      WHERE customer_id = ? AND workshop_id = ?
+    `, customer.customer_id, customer.workshop_id),
+    db.first<{ count: number }>(`
+      SELECT COUNT(*) AS count
+      FROM jobs j JOIN vehicles v ON v.id = j.vehicle_id AND v.workshop_id = j.workshop_id
+      WHERE v.customer_id = ? AND j.workshop_id = ?
+        AND COALESCE(j.repair_status, 'Received') NOT IN ('Collected')
+    `, customer.customer_id, customer.workshop_id),
+    db.first<{ count: number }>(`
+      SELECT COUNT(*) AS count
+      FROM jobs j JOIN vehicles v ON v.id = j.vehicle_id AND v.workshop_id = j.workshop_id
+      WHERE v.customer_id = ? AND j.workshop_id = ?
+        AND COALESCE(j.repair_status, 'Received') IN ('Repair Completed', 'Ready for Collection', 'Collected')
+    `, customer.customer_id, customer.workshop_id),
+    db.first<{ cents: number }>(`
+      SELECT COALESCE(SUM(GREATEST(0,
+        GREATEST(recorded_amount, paid_cents + pending_rows_cents) - paid_cents
+      )), 0) AS cents
+      FROM (
+        SELECT j.id,
+          CASE
+            WHEN j.final_amount_cents IS NOT NULL THEN j.final_amount_cents
+            ELSE COALESCE(j.estimated_total_cost_cents, 0)
+              + CASE WHEN COALESCE(j.estimated_total_cost_cents, 0) = 0
+                THEN COALESCE(j.estimated_labour_cost_cents, 0) + COALESCE(j.estimated_parts_cost_cents, 0)
+                ELSE 0 END
+          END AS recorded_amount,
+          COALESCE(paid.paid_cents, 0) AS paid_cents,
+          COALESCE(paid.pending_rows_cents, 0) AS pending_rows_cents
+        FROM jobs j
+        JOIN vehicles v ON v.id = j.vehicle_id AND v.workshop_id = j.workshop_id
+        LEFT JOIN (
+          SELECT job_id, workshop_id,
+            SUM(CASE WHEN LOWER(COALESCE(status, '')) = 'paid' THEN amount_cents ELSE 0 END) AS paid_cents,
+            SUM(CASE WHEN LOWER(COALESCE(status, '')) <> 'paid' THEN amount_cents ELSE 0 END) AS pending_rows_cents
+          FROM payments
+          WHERE workshop_id = ?
+          GROUP BY job_id, workshop_id
+        ) paid ON paid.job_id = j.id AND paid.workshop_id = j.workshop_id
+        WHERE v.customer_id = ? AND j.workshop_id = ?
+      ) amounts
+    `, customer.workshop_id, customer.customer_id, customer.workshop_id),
+    db.query<{
+      id: string;
+      job_id: string | null;
+      type: string;
+      title: string;
+      message: string;
+      is_read: number;
+      created_at: string;
+    }>(`
+      SELECT id, job_id, type, title, message, is_read, created_at
+      FROM customer_notifications
+      WHERE customer_id = ? AND workshop_id = ?
+      ORDER BY created_at DESC
+      LIMIT 5
+    `, customer.customer_id, customer.workshop_id),
+    db.query<{
+      id: string;
+      job_no: string;
+      service_type: string;
+      repair_status: string | null;
+      registration_number: string;
+      created_at: string;
+    }>(`
+      SELECT j.id, j.job_no, j.service_type, j.repair_status,
+        v.plate AS registration_number, j.created_at
+      FROM jobs j JOIN vehicles v ON v.id = j.vehicle_id AND v.workshop_id = j.workshop_id
+      WHERE v.customer_id = ? AND j.workshop_id = ?
+      ORDER BY j.created_at DESC
+      LIMIT 5
+    `, customer.customer_id, customer.workshop_id),
+  ]);
+
+  response.json({
+    profile,
+    summary: {
+      total_vehicles: toAmount(vehicleCount?.count),
+      active_jobs: toAmount(activeJobs?.count),
+      completed_repairs: toAmount(completedRepairs?.count),
+      pending_payment_cents: toAmount(pendingPayments?.cents),
+    },
+    recent_notifications: notifications,
+    recent_jobs: recentJobs.map(withStage),
+    stages: REPAIR_TRACKING_STAGES,
+  });
+}));
+
+app.get('/api/customer/profile', requireCustomerAuth, asyncRoute(async (_request, response) => {
+  const customer = customerPortalIdentity(response);
+  const profile = await db.first(`
+    SELECT c.id, COALESCE(ca.username, c.customer_code) AS username,
+      c.customer_code, c.display_name AS full_name, c.email, c.phone,
+      c.address, c.gender, c.created_at, c.updated_at,
+      ca.email AS account_email, ca.created_at AS account_created_at
+    FROM customers c
+    LEFT JOIN customer_accounts ca
+      ON ca.customer_id = c.id AND ca.workshop_id = c.workshop_id
+    WHERE c.id = ? AND c.workshop_id = ?
+  `, customer.customer_id, customer.workshop_id);
+  if (!profile) throw new HttpError(404, 'Customer profile not found.');
+  response.json({ profile });
+}));
+
+app.patch('/api/customer/profile', requireCustomerAuth, asyncRoute(async (request, response) => {
+  const customer = customerPortalIdentity(response);
+  const body = requireObject(request.body);
+  const assignments: string[] = [];
+  const values: (string | null)[] = [];
+
+  if (body.phone !== undefined) {
+    const phone = normalizedPhone(body.phone);
+    assignments.push('phone = ?', 'phone_normalized = ?');
+    values.push(phone.phone, phone.normalized);
+  }
+  if (body.address !== undefined) {
+    assignments.push('address = ?');
+    values.push(body.address === '' || body.address === null ? null : requiredText(body.address, 'Address', 1, 500));
+  }
+  if (assignments.length === 0) {
+    throw new HttpError(400, 'Provide at least one permitted profile field.');
+  }
+
+  const now = sessionClockNow();
+  try {
+    await db.execute(`
+      UPDATE customers SET ${assignments.join(', ')}, updated_at = ?
+      WHERE id = ? AND workshop_id = ?
+    `, ...values, now, customer.customer_id, customer.workshop_id);
+  } catch (error) {
+    if (error instanceof Error && /duplicate|ER_DUP_ENTRY/i.test(error.message)) {
+      throw new HttpError(409, 'That phone number is already registered in this workshop.');
+    }
+    throw error;
+  }
+  response.json({ updated: true });
+}));
+
+app.get('/api/customer/jobs', requireCustomerAuth, asyncRoute(async (_request, response) => {
+  const customer = customerPortalIdentity(response);
+  const jobs = await db.query<{
+    id: string;
+    job_no: string;
+    service_type: string;
+    issue_description: string | null;
+    repair_status: string | null;
+    repair_priority: string | null;
+    promised_at: string | null;
+    created_at: string;
+    updated_at: string;
+    registration_number: string;
+    make: string;
+    model: string;
+    assigned_mechanic_name: string | null;
+  }>(`
+    SELECT j.id, j.job_no, j.service_type, j.issue_description, j.repair_status,
+      j.repair_priority, j.promised_at, j.created_at, j.updated_at,
+      v.plate AS registration_number, v.make, v.model,
+      m.full_name AS assigned_mechanic_name
+    FROM jobs j
+    JOIN vehicles v ON v.id = j.vehicle_id AND v.workshop_id = j.workshop_id
+    LEFT JOIN users u ON u.id = j.assigned_technician AND u.workshop_id = j.workshop_id
+    LEFT JOIN mechanics m ON m.user_id = u.id AND m.workshop_id = j.workshop_id
+    WHERE v.customer_id = ? AND j.workshop_id = ?
+    ORDER BY j.created_at DESC
+  `, customer.customer_id, customer.workshop_id);
+  response.json({ jobs: jobs.map(withStage), stages: REPAIR_TRACKING_STAGES });
+}));
+
+app.get('/api/customer/jobs/:jobId', requireCustomerAuth, asyncRoute(async (request, response) => {
+  const customer = customerPortalIdentity(response);
+  const job = await requireCustomerJob(request.params.jobId, customer);
+  const [statusHistory, activities, parts, notifications, partsTotal] = await Promise.all([
+    db.query<{
+      previous_status: string | null;
+      new_status: string | null;
+      note: string | null;
+      changed_by_name: string | null;
+      changed_at: string;
+    }>(`
+      SELECT previous_status, new_status, note, changed_by_name, changed_at
+      FROM repair_status_history
+      WHERE job_id = ? AND workshop_id = ?
+      ORDER BY changed_at DESC
+    `, job.id, customer.workshop_id),
+    db.query<{
+      activity_type: string | null;
+      work_performed: string | null;
+      inspection_findings: string | null;
+      problems_identified: string | null;
+      recommendations: string | null;
+      additional_work_required: string | null;
+      created_by_name: string | null;
+      created_at: string;
+    }>(`
+      SELECT activity_type, work_performed, inspection_findings, problems_identified,
+        recommendations, additional_work_required, created_by_name, created_at
+      FROM repair_activity_logs
+      WHERE job_id = ? AND workshop_id = ?
+      ORDER BY created_at DESC
+    `, job.id, customer.workshop_id),
+    db.query<{
+      id: string;
+      part_name: string;
+      part_number: string;
+      quantity: number;
+      unit_price_cents: number;
+    }>(`
+      SELECT jp.id, p.name AS part_name, p.sku AS part_number,
+        jp.quantity, jp.unit_price_cents
+      FROM job_parts jp
+      JOIN parts p ON p.id = jp.part_id AND p.workshop_id = jp.workshop_id
+      WHERE jp.job_id = ? AND jp.workshop_id = ?
+      ORDER BY p.name
+    `, job.id, customer.workshop_id),
+    db.query<{
+      id: string;
+      title: string;
+      message: string;
+      is_read: number;
+      created_at: string;
+    }>(`
+      SELECT id, title, message, is_read, created_at
+      FROM customer_notifications
+      WHERE job_id = ? AND customer_id = ? AND workshop_id = ?
+      ORDER BY created_at DESC
+    `, job.id, customer.customer_id, customer.workshop_id),
+    db.first<{ cents: number }>(`
+      SELECT COALESCE(SUM(quantity * unit_price_cents), 0) AS cents
+      FROM job_parts WHERE job_id = ? AND workshop_id = ?
+    `, job.id, customer.workshop_id),
+  ]);
+
+  const timeline = [
+    ...statusHistory.map((entry) => ({
+      kind: 'status',
+      title: repairStageLabel(entry.new_status),
+      detail: entry.note,
+      actor: entry.changed_by_name,
+      at: entry.changed_at,
+    })),
+    ...activities.map((entry) => ({
+      kind: 'work',
+      title: entry.activity_type || 'Workshop update',
+      detail: [
+        entry.work_performed,
+        entry.inspection_findings,
+        entry.problems_identified,
+        entry.recommendations,
+        entry.additional_work_required,
+      ].filter(Boolean).join(' · ') || null,
+      actor: entry.created_by_name,
+      at: entry.created_at,
+    })),
+  ].sort((left, right) => String(right.at).localeCompare(String(left.at)));
+
+  response.json({
+    job: {
+      ...withStage(job),
+      parts_charges_cents: toAmount(partsTotal?.cents),
+    },
+    timeline,
+    parts,
+    notifications,
+    stages: REPAIR_TRACKING_STAGES,
+  });
+}));
+
+app.get('/api/customer/service-history', requireCustomerAuth, asyncRoute(async (_request, response) => {
+  const customer = customerPortalIdentity(response);
+  const records = await db.query<{
+    id: string;
+    job_no: string;
+    service_type: string;
+    issue_description: string | null;
+    repair_status: string | null;
+    service_date: string;
+    completed_at: string;
+    registration_number: string;
+    make: string;
+    model: string;
+    model_year: number;
+    assigned_mechanic_name: string | null;
+    work_performed: string | null;
+    parts_summary: string | null;
+    parts_charges_cents: number;
+    final_amount_cents: number | null;
+    estimated_total_cost_cents: number;
+  }>(`
+    SELECT j.id, j.job_no, j.service_type, j.issue_description, j.repair_status,
+      j.created_at AS service_date, j.updated_at AS completed_at,
+      v.plate AS registration_number, v.make, v.model, v.model_year,
+      m.full_name AS assigned_mechanic_name,
+      (
+        SELECT COALESCE(a.work_performed, a.inspection_findings, a.recommendations)
+        FROM repair_activity_logs a
+        WHERE a.job_id = j.id AND a.workshop_id = j.workshop_id
+        ORDER BY a.created_at DESC, a.id DESC
+        LIMIT 1
+      ) AS work_performed,
+      (
+        SELECT GROUP_CONCAT(CONCAT(p.name, ' x', jp.quantity) SEPARATOR ', ')
+        FROM job_parts jp
+        JOIN parts p ON p.id = jp.part_id AND p.workshop_id = jp.workshop_id
+        WHERE jp.job_id = j.id AND jp.workshop_id = j.workshop_id
+      ) AS parts_summary,
+      (
+        SELECT COALESCE(SUM(jp.quantity * jp.unit_price_cents), 0)
+        FROM job_parts jp
+        WHERE jp.job_id = j.id AND jp.workshop_id = j.workshop_id
+      ) AS parts_charges_cents,
+      j.final_amount_cents, j.estimated_total_cost_cents
+    FROM jobs j
+    JOIN vehicles v ON v.id = j.vehicle_id AND v.workshop_id = j.workshop_id
+    LEFT JOIN users u ON u.id = j.assigned_technician AND u.workshop_id = j.workshop_id
+    LEFT JOIN mechanics m ON m.user_id = u.id AND m.workshop_id = j.workshop_id
+    WHERE v.customer_id = ? AND j.workshop_id = ?
+      AND COALESCE(j.repair_status, 'Received') IN ('Repair Completed', 'Ready for Collection', 'Collected')
+    ORDER BY j.created_at DESC
+  `, customer.customer_id, customer.workshop_id);
+  response.json({ records: records.map(withStage) });
+}));
+
+app.get('/api/customer/billing', requireCustomerAuth, asyncRoute(async (_request, response) => {
+  const customer = customerPortalIdentity(response);
+  const [invoiceRows, payments] = await Promise.all([
+    db.query<{
+      job_id: string;
+      invoice_number: string | null;
+      job_no: string;
+      service_type: string;
+      registration_number: string;
+      make: string;
+      model: string;
+      final_amount_cents: number | null;
+      estimated_total_cost_cents: number;
+      estimated_labour_cost_cents: number;
+      estimated_parts_cost_cents: number;
+      parts_charges_cents: number;
+      paid_cents: number;
+      pending_cents: number;
+      latest_paid_at: string | null;
+      created_at: string;
+    }>(`
+      SELECT j.id AS job_id, MAX(p.invoice_number) AS invoice_number,
+        j.job_no, j.service_type, v.plate AS registration_number, v.make, v.model,
+        j.final_amount_cents, j.estimated_total_cost_cents,
+        j.estimated_labour_cost_cents, j.estimated_parts_cost_cents,
+        (
+          SELECT COALESCE(SUM(jp.quantity * jp.unit_price_cents), 0)
+          FROM job_parts jp
+          WHERE jp.job_id = j.id AND jp.workshop_id = j.workshop_id
+        ) AS parts_charges_cents,
+        COALESCE(SUM(CASE WHEN LOWER(COALESCE(p.status, '')) = 'paid' THEN p.amount_cents ELSE 0 END), 0) AS paid_cents,
+        COALESCE(SUM(CASE WHEN LOWER(COALESCE(p.status, '')) <> 'paid' THEN p.amount_cents ELSE 0 END), 0) AS pending_cents,
+        MAX(p.paid_at) AS latest_paid_at, j.created_at
+      FROM jobs j
+      JOIN vehicles v ON v.id = j.vehicle_id AND v.workshop_id = j.workshop_id
+      LEFT JOIN payments p ON p.job_id = j.id AND p.workshop_id = j.workshop_id
+      WHERE j.workshop_id = ? AND v.customer_id = ?
+        AND (
+          j.final_amount_cents IS NOT NULL
+          OR COALESCE(j.estimated_total_cost_cents, 0) > 0
+          OR (COALESCE(j.estimated_labour_cost_cents, 0) + COALESCE(j.estimated_parts_cost_cents, 0)) > 0
+          OR EXISTS (
+            SELECT 1 FROM payments p2
+            WHERE p2.job_id = j.id AND p2.workshop_id = j.workshop_id
+          )
+        )
+      GROUP BY j.id, j.job_no, j.service_type, v.plate, v.make, v.model,
+        j.final_amount_cents, j.estimated_total_cost_cents,
+        j.estimated_labour_cost_cents, j.estimated_parts_cost_cents, j.created_at
+      ORDER BY j.created_at DESC
+    `, customer.workshop_id, customer.customer_id),
+    db.query<{
+      id: string;
+      invoice_number: string;
+      job_id: string | null;
+      job_no: string;
+      amount_cents: number;
+      payment_method: string;
+      status: string;
+      paid_at: string | null;
+      created_at: string;
+    }>(`
+      SELECT p.id, p.invoice_number, p.job_id, j.job_no, p.amount_cents,
+        p.payment_method, p.status, p.paid_at, p.created_at
+      FROM payments p
+      LEFT JOIN jobs j ON j.id = p.job_id AND j.workshop_id = p.workshop_id
+      WHERE p.workshop_id = ? AND j.id IN (
+        SELECT j2.id FROM jobs j2
+        JOIN vehicles v ON v.id = j2.vehicle_id AND v.workshop_id = j2.workshop_id
+        WHERE v.customer_id = ? AND j2.workshop_id = ?
+      )
+      ORDER BY p.created_at DESC
+    `, customer.workshop_id, customer.customer_id, customer.workshop_id),
+  ]);
+
+  const invoices = invoiceRows.map((row) => {
+    const partsCharges = toAmount(row.parts_charges_cents);
+    const hasFinal = row.final_amount_cents !== null && row.final_amount_cents !== undefined;
+    const estimate = toAmount(row.estimated_total_cost_cents)
+      || toAmount(row.estimated_labour_cost_cents) + toAmount(row.estimated_parts_cost_cents);
+    const total = hasFinal ? toAmount(row.final_amount_cents) : estimate || partsCharges;
+    const paid = toAmount(row.paid_cents);
+    const serviceCharges = Math.max(0, total - partsCharges);
+    const outstanding = Math.max(0, total - paid);
+    return {
+      ...row,
+      total_amount_cents: total,
+      total_source: hasFinal
+        ? 'Recorded final amount'
+        : estimate
+          ? 'Estimate recorded on the job card'
+          : partsCharges
+            ? 'Issued parts recorded on the job card'
+            : 'No amount recorded',
+      service_charges_cents: serviceCharges,
+      spare_parts_charges_cents: partsCharges,
+      amount_paid_cents: paid,
+      outstanding_cents: outstanding,
+      payment_status: outstanding === 0 && paid > 0
+        ? 'Paid'
+        : paid > 0 ? 'Partially paid' : total > 0 ? 'Amount not settled' : 'Not recorded',
+    };
+  });
+
+  response.json({ invoices, payments });
+}));
+
+app.get('/api/customer/notifications', requireCustomerAuth, asyncRoute(async (_request, response) => {
+  const customer = customerPortalIdentity(response);
+  const [notifications, unread] = await Promise.all([
+    db.query<{
+      id: string;
+      job_id: string | null;
+      type: string;
+      title: string;
+      message: string;
+      is_read: number;
+      created_at: string;
+      read_at: string | null;
+    }>(`
+      SELECT id, job_id, type, title, message, is_read, created_at, read_at
+      FROM customer_notifications
+      WHERE customer_id = ? AND workshop_id = ?
+      ORDER BY created_at DESC
+      LIMIT 100
+    `, customer.customer_id, customer.workshop_id),
+    db.first<{ count: number }>(`
+      SELECT COUNT(*) AS count FROM customer_notifications
+      WHERE customer_id = ? AND workshop_id = ? AND is_read = 0
+    `, customer.customer_id, customer.workshop_id),
+  ]);
+  response.json({ notifications, unread_count: toAmount(unread?.count) });
+}));
+
+app.patch('/api/customer/notifications/read-all', requireCustomerAuth, asyncRoute(async (_request, response) => {
+  const customer = customerPortalIdentity(response);
+  const now = sessionClockNow();
+  await db.execute(`
+    UPDATE customer_notifications
+    SET is_read = 1, read_at = ?
+    WHERE customer_id = ? AND workshop_id = ? AND is_read = 0
+  `, now, customer.customer_id, customer.workshop_id);
+  response.json({ updated: true });
+}));
+
+app.patch('/api/customer/notifications/:id/read', requireCustomerAuth, asyncRoute(async (request, response) => {
+  const customer = customerPortalIdentity(response);
+  const result = await db.execute(`
+    UPDATE customer_notifications
+    SET is_read = 1, read_at = ?
+    WHERE id = ? AND customer_id = ? AND workshop_id = ?
+  `, sessionClockNow(), request.params.id, customer.customer_id, customer.workshop_id);
+  if (result.affectedRows === 0) throw new HttpError(404, 'Notification not found.');
+  response.json({ updated: true });
 }));
 
 /* -------------------------------------------------------------------------- */
